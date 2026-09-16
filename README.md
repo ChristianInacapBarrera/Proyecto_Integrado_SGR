@@ -61,7 +61,7 @@ Proyecto_Integrado_SGR/
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/Crystamoon666/Proyecto_Integrado_SGR.git
+git clone https://github.com/ChristianInacapBarrera/Proyecto_Integrado_SGR.git
 cd Proyecto_Integrado_SGR
 ```
 
