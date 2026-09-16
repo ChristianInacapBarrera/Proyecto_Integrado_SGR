@@ -30,6 +30,24 @@ class ScopedModelAdmin:
             return qs.none()
         return qs.filter(**{self.scope_by: delegacion})
 
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if not es_usuario_sin_restriccion(request.user):
+            delegacion = get_usuario_delegacion(request.user)
+            if delegacion is not None:
+                relacionado = db_field.related_model
+                if relacionado is type(delegacion):
+                    kwargs['queryset'] = relacionado.objects.filter(pk=delegacion.pk)
+                elif any(campo.name == 'delegacion' for campo in relacionado._meta.fields):
+                    kwargs['queryset'] = relacionado.objects.filter(delegacion=delegacion)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def has_add_permission(self, request):
+        if not super().has_add_permission(request):
+            return False
+        if es_usuario_sin_restriccion(request.user):
+            return True
+        return get_usuario_delegacion(request.user) is not None
+
     def _objeto_en_alcance(self, request, obj):
         if obj is None:
             return True
