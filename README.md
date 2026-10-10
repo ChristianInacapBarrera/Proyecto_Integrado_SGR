@@ -6,14 +6,14 @@ Proyecto integrado académico (INACAP) correspondiente al caso de las delegacion
 
 El **Sistema de Gestión de Resultados (SGR)** es una aplicación web que centraliza el registro, seguimiento, verificación y medición de la gestión de funcionarios y delegaciones, generando indicadores individuales y colectivos que apoyan el control operativo y la toma de decisiones.
 
-Esta entrega corresponde a la **Evaluación Sumativa II — "Taller: Aplicación web con Django Admin"**: aplicación Django con base de datos configurada mediante variables de entorno y un Django Admin funcional, personalizado y protegido según la problemática municipal.
+Esta entrega corresponde a la **Evaluación Formativa – Unidad II (Programación Back End, TI3V41)**: integración Django de autenticación, recuperación de contraseña, permisos y scoping, CRUD con ModelForm, archivos, sesiones y paginación, borrado lógico, exportación a Excel y despliegue en AWS Academy, sobre MySQL/MariaDB.
 
 > **Importante:** el proyecto se usa únicamente con **datos ficticios**. Está prohibido cargar información real de ciudadanos o funcionarios.
 
 ## Stack y dependencias
 
 - **Backend:** Python 3 + Django 6.1.1
-- **Base de datos:** SQLite (desarrollo, portable) / PostgreSQL (producción, opcional vía variables de entorno)
+- **Base de datos:** MySQL 8.4+ o MariaDB 10.11+ (local en desarrollo, Amazon RDS en AWS), configurada por variables de entorno. Son las versiones mínimas que acepta Django 6.1.
 - **Variables de entorno:** `python-dotenv`
 
 | Paquete | Versión |
@@ -23,11 +23,15 @@ Esta entrega corresponde a la **Evaluación Sumativa II — "Taller: Aplicación
 | python-dotenv | 1.2.3 |
 | sqlparse | 0.6.0 |
 | tzdata | 2026.3 |
+| pillow | 12.3.0 |
+| mysqlclient | 2.3.0 |
 
 ## Requisitos previos
 
 - **Git** instalado.
-- **Python 3** instalado (entorno de desarrollo verificado con Python 3.12).
+- **Python 3.12+** instalado (Django 6.1 no funciona con versiones anteriores).
+- **MySQL 8.4+ o MariaDB 10.11+** en ejecución (local, en Docker o Amazon RDS). Para un equipo sin MariaDB (laboratorio) se admite SQLite: `DB_ENGINE=django.db.backends.sqlite3` en el `.env`.
+- Para compilar `mysqlclient` en Linux: `sudo apt install pkg-config libmariadb-dev` (Debian/Ubuntu) o `sudo dnf install python3.12 python3.12-devel gcc pkgconf mariadb1011-devel` (Amazon Linux 2023; si `mariadb1011-devel` no existe en su versión, use `mariadb-connector-c-devel`). En Amazon Linux 2023 `python3` es la 3.9: cree el entorno con `python3.12 -m venv .venv`. En Windows y macOS `pip` descarga una rueda precompilada.
 - Se documentan comandos para **Linux/macOS (bash/zsh)**; para Windows se usan los equivalentes de `venv`/`activate`.
 
 ## Arquitectura modular (apps Django)
@@ -36,23 +40,30 @@ Cada módulo del dominio SGR es una app Django independiente:
 
 ```
 Proyecto_Integrado_SGR/
-├── config/          # Proyecto Django (settings, urls, wsgi, asgi) + vista de la página de inicio
-├── core/            # Delegacion, Cargo, TipoActividad, Periodo, Parametro + admin_utils (scoping) + seed_data
-├── funcionarios/    # Funcionario (perfil), grupos/permisos (security.py)
-├── actividades/     # Actividad, AtencionSocial
-├── evidencias/      # Evidencia, Validacion + acción "Aprobar evidencias seleccionadas"
-├── agenda/          # Compromiso, SeguimientoCompromiso
-├── medicion/        # Meta, Ponderacion, Indicador + fórmulas de cálculo (services.py)
-├── monitoreo/       # TableroPanel
-├── reportes/        # Servicios de exportación (sin modelos propios)
-├── colaboracion/    # Comentario, Alerta, TrazaAuditoria
-├── templates/       # Plantillas de proyecto: landing.html y override de admin/base_site.html
+├── config/          # Proyecto Django (settings, urls con django.contrib.auth.urls, wsgi, asgi) + portada
+├── core/            # Delegation, Position, ActivityType, Period, Parameter + scoping, soft delete y seed_data
+├── funcionarios/    # Employee (perfil), PasswordResetCode, grupos/permisos (security.py), login y recuperación
+├── actividades/     # Activity, SocialCase + CRUD web protegido (ListView/CreateView/UpdateView/DeleteView + modal)
+├── evidencias/      # Evidence, Validation + acción "Aprobar evidencias seleccionadas" + carga de archivos validada
+├── agenda/          # Commitment, CommitmentFollowUp
+├── api/             # API REST con JWT: serializers, viewsets, roles, paginación y token (6 recursos)
+├── medicion/        # Goal, Weighting, Indicator + fórmulas de cálculo (services.py)
+├── monitoreo/       # DashboardPanel
+├── dashboard/       # Dashboard de resumen por funcionario y rol (services.py)
+├── reportes/        # Exportación a Excel (.xlsx) con openpyxl (services.py)
+├── colaboracion/    # Comment, Alert, AuditLog
+├── templates/       # landing, base, 403/404/500, registration/ (login y recuperación), dashboard/, crud/list.html (los 4 CRUD)
+├── static/          # static/css/style.css y static/js/confirmar.js (SweetAlert2)
 ├── .env.example
 ├── .gitignore
 ├── manage.py
 ├── README.md
 └── requirements.txt
 ```
+
+### Nomenclatura
+
+Los nombres técnicos de **modelos, campos, tablas y valores internos de choices** están en inglés, en `snake_case` para campos y tablas (`db_table`: `activity`, `evidence`, `commitment_follow_up`…) y `PascalCase` para modelos. Las etiquetas que ve el usuario siguen en español mediante `verbose_name` y las etiquetas de choices. Las carpetas de las apps conservan su nombre original (`actividades`, `evidencias`…) para no cambiar rutas ni permisos.
 
 `core` no depende de ninguna otra app. Todas las demás dependen de `core` y/o `funcionarios`, sin imports circulares.
 
@@ -61,8 +72,8 @@ Proyecto_Integrado_SGR/
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/ChristianInacapBarrera/Proyecto_Integrado_SGR.git
-cd Proyecto_Integrado_SGR
+git clone https://github.com/estebantr93-lab/bak2.git
+cd bak2
 ```
 
 ### 2. Crear y activar el entorno virtual
@@ -89,11 +100,29 @@ cp .env.example .env
 Valores documentados en `.env.example`:
 
 ```
-SECRET_KEY=change-this-secret-key-in-your-local-env
+SECRET_KEY=<generar una propia, ver .env.example>
 DEBUG=True
 ALLOWED_HOSTS=localhost,127.0.0.1
-DB_ENGINE=django.db.backends.sqlite3
-DB_NAME=db.sqlite3
+DB_ENGINE=django.db.backends.mysql
+DB_NAME=sgr
+DB_USER=sgr_app
+DB_PASSWORD=cambiar-esta-clave
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_SSL_CA=
+```
+
+### 4.1 Crear la base de datos y su usuario (una sola vez)
+
+Hay que usar un usuario propio de la aplicación, no `root`. Como administrador de MySQL/MariaDB:
+
+```sql
+CREATE DATABASE sgr CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'sgr_app'@'%' IDENTIFIED BY 'cambiar-esta-clave';
+GRANT ALL PRIVILEGES ON sgr.* TO 'sgr_app'@'%';
+-- Solo si se ejecutan los tests: Django crea y borra la base test_sgr.
+GRANT ALL PRIVILEGES ON test_sgr.* TO 'sgr_app'@'%';
+FLUSH PRIVILEGES;
 ```
 
 > El archivo `.env` no se versiona (ver `.gitignore`). Cada equipo/computador genera el suyo a partir de la plantilla.
@@ -111,9 +140,50 @@ python manage.py migrate
 python manage.py seed_data
 ```
 
-El comando `seed_data` (definido en `core/management/commands/seed_data.py`) ejecuta, en orden de dependencias, los seeders de `core → funcionarios → medicion → actividades → evidencias → agenda → colaboracion`, creando de forma **idempotente**: 2 delegaciones, 4 cargos, 5 tipos de actividad, 2 períodos (uno cerrado, uno abierto), parámetros, metas/ponderaciones/indicadores, 8 actividades (con evidencias y validaciones) repartidas entre ambas delegaciones, 4 compromisos de agenda (con seguimientos) y los usuarios/grupos de prueba. Al finalizar imprime un resumen de conteos y las credenciales de demostración.
+El comando `seed_data` (definido en `core/management/commands/seed_data.py`) ejecuta, en orden de dependencias, los seeders de `core → funcionarios → medicion → actividades → evidencias → agenda → colaboracion`, creando de forma **idempotente**: 2 delegaciones, 4 cargos, 5 tipos de actividad, 2 períodos relativos a la fecha de la carga (ver abajo), parámetros, metas/ponderaciones/indicadores, 8 actividades (con evidencias y validaciones) repartidas entre ambas delegaciones, 4 compromisos de agenda (con seguimientos) y los usuarios/grupos de prueba. Al finalizar recalcula el estado de cada actividad según sus evidencias e imprime un resumen de conteos y las cuentas de prueba. Las contraseñas solo se muestran si se generaron al azar.
 
-> Para reconstruir desde cero: eliminar `db.sqlite3` y repetir los pasos 5 y 6.
+#### Fechas relativas al día de la carga
+
+Para que la demo funcione el día que se presente, los datos se arman alrededor de la fecha en que se ejecuta `seed_data`:
+
+- **Período actual:** desde el primer día de hace 3 meses hasta el último día de dentro de 2 meses (por ejemplo, «jun–nov 2026 (actual)»). Hoy siempre queda dentro, así se pueden registrar actividades.
+- **Período cerrado:** los 6 meses anteriores (por ejemplo, «dic 2025–may 2026 (cerrado)»). Llega completamente revisado: no deja evidencias pendientes que nadie podría revisar.
+- **Actividades:** entre el inicio del período y hoy (nunca futuras). **Compromisos:** vencen entre 60 días atrás y 120 días adelante, así siempre hay vencidos y por vencer.
+- **Metas:** acordes al volumen generado, así el semáforo muestra verdes, ámbar y rojos. Con el tope de 100 %, pocos funcionarios llegan al 100 % y la mayoría queda repartida entre 30 % y 90 %.
+- **Evidencias pendientes:** subidas en las últimas 3 semanas, así ninguna aparece esperando meses.
+- Si ya existen períodos, `seed_data` los conserva (no crea otros que se solapen), y las metas existentes tampoco se cambian. **Una base cargada antes de estos cambios (la local o la de AWS) conserva el período antiguo, que vence el 30-09, con tope 150 % y metas altas: desde octubre no se podrán registrar actividades.** Antes de la demo, vuelva a armar todo con la fecha de hoy:
+
+```bash
+git pull
+python manage.py migrate                  # aplica las migraciones nuevas
+python manage.py flush --noinput          # vacía la base (usuarios incluidos)
+python manage.py seed_data --volumen      # recrea demo y volumen con las fechas de hoy
+python manage.py revisar_archivos --borrar-huerfanos   # borra los archivos de la carga anterior
+```
+
+#### Datos de volumen (1.000+ registros)
+
+```bash
+python manage.py seed_data --volumen
+```
+
+Además de la demo, agrega de forma **reproducible** (semilla fija) e **idempotente**, sin duplicar si se vuelve a ejecutar, **más de 1.600 registros de negocio** repartidos **en partes iguales entre ambas delegaciones** (tres de cada cuatro actividades en el período actual):
+
+| Por delegación (aprox.) | Centro | Norte |
+| --- | --- | --- |
+| Actividades | 254 | 254 |
+| Evidencias (con archivo PNG/PDF real) | 206 (54) | 210 (48) |
+| Atenciones sociales | 105 | 87 |
+| Compromisos | 64 | 65 |
+| Funcionarios | 10 | 10 |
+
+- Las cuentas de demostración tienen datos propios. `funcionario_centro` y `funcionario_norte` tienen entre 50 y 60 actividades cada uno, con evidencias y compromisos. Los admins tienen un bloque menor.
+- Los funcionarios generados tienen cargos operativos (Atención Ciudadana y Social) y no tienen contraseña utilizable: son datos, no cuentas de acceso.
+- Las evidencias aprobadas o rechazadas incluyen su `Validation` hecha por el verificador.
+- Para regenerar desde cero solo el volumen (por ejemplo en AWS): `python manage.py seed_data --rehacer-volumen`.
+- El código está en `core/volume_data.py`.
+
+> Para reconstruir desde cero: `DROP DATABASE sgr; CREATE DATABASE sgr CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;` y repetir los pasos 5 y 6.
 
 ### 7. Levantar el servidor
 
@@ -121,71 +191,471 @@ El comando `seed_data` (definido en `core/management/commands/seed_data.py`) eje
 python manage.py runserver
 ```
 
-El proyecto expone dos rutas:
+El proyecto expone estas rutas:
 
 | URL | Contenido |
 | --- | --- |
-| **http://127.0.0.1:8000/** | Portada pública del sistema. Solo identifica al SGR y ofrece el botón **Ingresar al sistema**; no expone datos ni estructura interna. |
-| **http://127.0.0.1:8000/admin/** | Django Admin, donde se realiza toda la operación y la demostración de la evaluación. |
+| **http://127.0.0.1:8000/** | Portada pública. El botón **Ingresar al sistema** lleva al login. |
+| **http://127.0.0.1:8000/accounts/login/** | Login (`django.contrib.auth.urls`). Tras ingresar redirige al dashboard (o a `?next=`). |
+| **http://127.0.0.1:8000/accounts/logout/** | Cierre de sesión (solo `POST`, botón en la barra superior). |
+| **http://127.0.0.1:8000/accounts/recuperar/** | Recuperación de contraseña con código temporal de 6 dígitos. |
+| **http://127.0.0.1:8000/actividades/**, **/actividades/atenciones/**, **/evidencias/**, **/compromisos/** | CRUD protegidos con exportación a Excel. |
+| **http://127.0.0.1:8000/dashboard/** | Dashboard: resumen por funcionario agrupado por rol, acotado a lo que el usuario puede ver. |
+| **http://127.0.0.1:8000/admin/** | Django Admin. `/admin/login/` redirige al login propio. |
+
+### Dashboard por rol
+
+Cada rol ve lo que le sirve (banderas `es_funcionario`, `es_verificador` y `es_gestor` en `dashboard/views.py`, con las constantes de rol de `core/admin_utils.py`):
+
+| Rol | Alcance | Qué muestra |
+| --- | --- | --- |
+| Administrador general (superusuario) | Ambas delegaciones | Avance del equipo: funcionarios, actividades, evidencias por revisar y compromisos vencidos (a hoy); estado de actividades; cumplimiento promedio; resumen por funcionario (con **Ver detalle**) y destacados. |
+| Administrador de delegación (grupo `Administradores`) | Solo **su** delegación | Lo mismo que el administrador general, acotado a su delegación. |
+| Verificador (grupo `Verificadores`) | Ambas delegaciones | Su cola de trabajo: evidencias por revisar (con enlace a la lista filtrada), espera más larga, revisadas y rechazadas; estado de evidencias; pendientes por delegación; evidencias recibidas por mes. No se le ofrecen enlaces a listas que no puede abrir. |
+| Funcionario (grupo `Funcionarios`) | Solo sus datos | Su avance: actividades, actividades sin evidencia, evidencias rechazadas por corregir y compromisos por vencer; su cumplimiento y el **avance por tipo de actividad** que lo explica. |
+
+**Cumplimiento.** Las metas (`Goal`) son por cargo, período y tipo de actividad, con ponderador. Para cada tipo con meta se calcula `aprobadas del tipo / meta`, con el tope del período (`Period.max_cap`, 100 %): nadie supera el 100 % y sobrecumplir un tipo no tapa el incumplimiento de otro, y luego el promedio ponderado (`medicion.services.calcular_cumplimiento_ponderado`). Las actividades de tipos sin meta no cuentan. El cumplimiento de un grupo es el promedio del de sus funcionarios con meta. El semáforo compara con el % esperado a la fecha. Si el período no tiene metas, el dashboard lo dice en vez de mostrar 0 %.
+
+**Cada indicador coincide con su lista.** Los indicadores con enlace abren la lista con los mismos filtros que su conteo (período, «solo los míos», estado, sin evidencia, vencidos o por vencer), y la lista dice qué filtro aplica, por ejemplo «Filtrado: período jun–nov 2026 (actual) · rechazada · solo las mías (3)». Los filtros también sirven escritos a mano: `?period=`, `?status=`, `?mias=1`, `?sin_evidencia=1` (Actividades), `?vencidos=1` y `?por_vencer=1` (Compromisos).
+
+**Qué depende del período.** Actividades, evidencias y cumplimiento son del período elegido. Los compromisos se muestran **a hoy** (vencidos y por vencer en los próximos 7 días), porque no pertenecen a un período.
+
+Diseño (paleta institucional roja/vinotinto/terracota de `static/css/style.css`, clases `.dash-*`): banner con período y rol, 4 indicadores (enlazan a la lista correspondiente cuando el usuario puede verla), dona de estados, anillo con el % de evidencias del período ya revisadas y barras por mes. Parciales: `templates/dashboard/_kpi.html`, `_dona.html` y `_por_mes.html`.
+
+Todo se calcula en `dashboard/services.py` (sin librerías de gráficos). Los números que van en CSS/SVG usan `|unlocalize`, porque en `es-cl` los decimales llevan coma.
+
+**Menú y tema.** La navegación, el selector de tema y **Cerrar sesión** están en el menú hamburguesa de la barra superior (en todos los tamaños de pantalla), con texto oscuro sobre fondo claro para mejor contraste. El tema puede ser **Claro**, **Oscuro** o **Por defecto** (sigue al sistema operativo); usa los modos de color de Bootstrap 5.3 (`data-bs-theme`) y la preferencia se guarda en el navegador (`static/js/tema.js`). Los colores de estado del dashboard tienen una versión propia para el modo oscuro, validada para daltonismo.
+
+**Admin integrado al sistema.** `/admin/` usa la misma barra roja, el mismo menú hamburguesa (enlaces de `templates/includes/menu_navegacion.html`, compartidos con la app), el mismo pie y la misma paleta en tarjetas (`templates/admin/base_site.html` y `core/static/admin/css/custom_admin.css`, sin librerías externas). El tema es uno solo: la app y el admin guardan la preferencia en la misma clave del navegador (`theme`), así que elegir «Oscuro» en uno se respeta en el otro. Los textos nuevos de Django 6.1 que aún no traía traducidos («- Select an option -», «Run», avisos de zona horaria, algunos errores de formulario) están traducidos en `locale/es/` (`LOCALE_PATHS`). Si se editan los `.po`, recompilar con `python manage.py compilemessages` (requiere `sudo apt install gettext`); los `.mo` ya compilados vienen en el repositorio.
+
+**Archivos de evidencias.** La carga de volumen genera imágenes PNG y PDF de una página válidos (`evidencias/archivos.py`). Para revisar la carpeta de archivos:
+
+```bash
+python manage.py revisar_archivos                              # informa faltantes, dañados y huérfanos
+python manage.py revisar_archivos --reparar --borrar-huerfanos # regenera los de ejemplo y borra los huérfanos
+```
+
+`--reparar` solo regenera archivos de ejemplo (código `EVI-VOL-…`); un archivo subido por un usuario nunca se reemplaza, se informa para volver a subirlo. En los listados, una evidencia cuyo archivo ya no está en el servidor muestra «Archivo no disponible» en vez de un enlace roto. Los huérfanos aparecen, por ejemplo, al recrear la base de datos sin vaciar `media/`.
+
+### Autenticación y sesiones (Clase 6)
+
+- Rutas de `django.contrib.auth.urls` en `config/urls.py`; `LOGIN_URL = 'login'`, `LOGIN_REDIRECT_URL = 'dashboard'`, `LOGOUT_REDIRECT_URL = 'login'`.
+- Seguridad por capas: `login_required` / `LoginRequiredMixin` (autenticación), `permission_required` / `PermissionRequiredMixin` (autorización) y `filtrar_por_delegacion` en cada QuerySet (scoping). Una cuenta sin rol o sin perfil de delegación recibe **403**.
+- `request.session` guarda solo preferencias: el período elegido en el dashboard y la cantidad de filas por página (5/15/30), que aplica a todos los listados.
+- Mensajes (`django.contrib.messages`) al ingresar, al cerrar sesión y en cada operación del CRUD.
+- El login (`funcionarios.views.IngresoView`, un `LoginView` con `funcionarios.forms.LoginForm`) responde **siempre «Usuario o contraseña incorrectos.»** ante cualquier rechazo: clave incorrecta, usuario inexistente o inactivo, cuenta **sin rol** (no está en `Administradores`, `Funcionarios` ni `Verificadores`, con ese nombre exacto), cuenta con rol pero **sin perfil de funcionario con delegación**, perfil desactivado o **bloqueo por intentos**. Así la respuesta no revela si la cuenta existe, si la clave era correcta ni en qué estado está la cuenta (clase 6: el mensaje no revela cuál credencial falló).
+  - El motivo real queda en la traza de auditoría (`login_rechazado`, con el motivo, o `login_bloqueado`), visible para el administrador general.
+  - Para saber qué le falta a una cuenta: `python manage.py diagnosticar_acceso <usuario o correo>`. Muestra los grupos, el rol, el perfil, los últimos rechazos con su motivo y qué corregir. Detecta un grupo mal escrito (por ejemplo «Funcionario» en vez de «Funcionarios»), un perfil vinculado a otra cuenta y un usuario escrito distinto al de la cuenta. Solo lee: no cambia nada.
+  - Los rechazos con la clave correcta también cuentan para el bloqueo por intentos; si no, el contador dejaría ver cuándo se acertó la clave.
+  - La misma regla (`tiene_acceso_al_sistema`) protege el dashboard.
+- **Botón atrás y caché:**
+  - Abrir el login con una sesión iniciada (por ejemplo, con «atrás» después de ingresar) **cierra la sesión**: queda en la traza y se muestra «Por seguridad, se cerró su sesión». «Adelante» vuelve a pedir la clave.
+  - Las páginas vistas con sesión se envían con `Cache-Control: no-store, private` (`core.middleware.SinCacheConSesionMiddleware`), así que tras cerrar sesión el navegador no muestra copias guardadas.
+  - `static/js/sesion.js` recarga la página si el navegador la restaura desde su memoria de atrás/adelante.
+- `MESSAGE_TAGS` asigna la clase `danger` de Bootstrap a `messages.error()`, y `templates/403.html` muestra «Acceso denegado» con el estilo del sitio.
+- Cookies: `SESSION_COOKIE_AGE` de 2 horas, `HTTPONLY`, `SAMESITE='Lax'` y `SESSION/CSRF_COOKIE_SECURE` desde `COOKIE_SECURE` en `.env`.
+
+### Recuperación de contraseña (guía autónoma)
+
+Enlace **¿Olvidó su contraseña?** en el login → correo → código de 6 dígitos (`secrets`) → nueva contraseña (`SetPasswordForm`, que usa `set_password()`).
+Solo se guarda el **hash** del código (`PasswordResetCode`). El código vence en **120 s**, es de **uso único**, admite **5 intentos** y pedir uno nuevo invalida los anteriores. La respuesta es siempre genérica («Si el correo corresponde…»).
+En desarrollo el correo se imprime en la terminal de `runserver`. Django 6.1 reemplaza `EMAIL_BACKEND`/`EMAIL_HOST`/... por `MAILERS`, y definir ambos es un error; por eso `settings.py` lee las mismas variables de `.env` (`EMAIL_BACKEND`, `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS`) dentro de `MAILERS`. Para usar Mailtrap basta con cambiar esas variables.
+
+Cada usuario puede pedir como máximo `RECUPERACION_MAX_SOLICITUDES_HORA` (5) códigos por hora: cada código trae sus propios intentos, así que sin tope se podría adivinar pidiendo códigos sin fin. Pasado el tope, la respuesta es la misma genérica y no se envía correo.
+
+### Política de contraseñas
+
+`AUTH_PASSWORD_VALIDATORS` exige **mínimo 10 caracteres** (`MinimumLengthValidator`) y **mayúscula, minúscula, número y carácter especial** (`core/validators.py`), además de los validadores de similitud con el usuario y de contraseñas comunes. Se aplica en la recuperación de contraseña, que pide la clave dos veces con `SetPasswordForm`, y en el Admin. Django guarda solo el hash (PBKDF2), nunca el texto plano.
+
+### CRUD protegidos, paginación y Excel (Clase 7 + investigación)
+
+Hay cuatro CRUD completos (crear, listar, editar y eliminar lógicamente) construidos sobre una base común, `core/crud.py`. Cada entidad solo declara su modelo, columnas, formulario (ModelForm) y permisos:
+
+| CRUD | URL | Validaciones de servidor destacadas |
+| --- | --- | --- |
+| Actividades | `/actividades/` | número único (también contra eliminadas), período cerrado, funcionario de la misma delegación |
+| Atenciones sociales | `/actividades/atenciones/` | gestión 1 a 3 (validadores de rango), máximo 3 por actividad, sin duplicados, solo actividades de tipo social |
+| Evidencias (con archivo) | `/evidencias/` | archivo obligatorio al crear, 2 MB, extensión y contenido real; solo el verificador cambia el estado |
+| Compromisos | `/compromisos/` | título mínimo, vencimiento no pasado, responsable de la misma delegación, "realizado" exige observaciones |
+
+- **Propiedad (rol funcionario):** ve toda su delegación, pero solo modifica lo propio. La regla se declara en el modelo (`owner_field`, `bloqueo_modificacion`) y la aplica una política única (`core/admin_utils.py`) en el CRUD web y en el Django Admin: cambio, borrado, opciones de formularios y autocompletado. Una actividad de un **período cerrado** no se edita ni se elimina (403), y el período es obligatorio en el formulario.
+- **Seguridad por capas en cada vista:** `LoginRequiredMixin` (anónimo → login), `PermissionRequiredMixin` (sin permiso → 403) y scoping por delegación en `get_queryset` (un objeto de otra delegación → 404). Ocultar un botón no protege nada; cada vista vuelve a verificar.
+- **Modal:** crear y editar usan el mismo ModelForm en un modal de Bootstrap. Si hay errores, la misma plantilla se vuelve a mostrar con el modal abierto. Cada operación conserva su URL (`nueva/`, `<id>/editar/`, `<id>/eliminar/`).
+- **Eliminar:** solo por POST con CSRF, previa confirmación con SweetAlert2 (`static/js/confirmar.js`). El resultado es un **borrado lógico**.
+- **Paginación:** 5, 15 o 30 registros por página. La elección se guarda en `request.session['page_size']` y aplica a todos los listados. Los valores no permitidos se ignoran.
+- **Exportar a Excel:** el botón "Exportar Excel" descarga un `.xlsx` generado con **openpyxl** (`CrudExportView`), con encabezados y los datos del **mismo QuerySet del listado**. Por eso respeta permisos, scoping por delegación y borrado lógico. El archivo se arma en memoria: `Workbook()` → `hoja.append(fila)` → `libro.save(response)`.
+
+#### Diseño de los listados (pestañas, búsqueda, orden y selección)
+
+Los cuatro listados comparten una sola plantilla (`templates/crud/list.html`) y la lógica de `core/crud.py`. Cada CRUD solo declara sus `tabs`, `kpis`, `search_fields` y qué columnas se pueden ordenar (`Column(..., sort=...)`):
+
+- **Tarjetas de resumen y pestañas con conteo:** por ejemplo Todas / Pendientes / Aprobadas / Rechazadas / Sin evidencia en actividades, o Vencidos y "Vencen en 7 días" en compromisos. Los conteos salen del **mismo QuerySet acotado** del listado, así que cada rol ve solo los números de su alcance.
+- **Búsqueda** (`?q=`, máx. 100 caracteres) sobre los campos declarados. Se mantiene al cambiar de pestaña, página u orden.
+- **Orden por columna** (`?orden=campo` / `?orden=-campo`). Solo se aceptan las columnas declaradas (lista blanca). Cualquier otro valor se ignora, para que no se pueda ordenar por campos internos.
+- **Selección de filas:** al marcar filas aparece una barra flotante con "Exportar a Excel", que descarga solo las filas seleccionadas (`?ids=`). El servidor vuelve a filtrar esos ids dentro del alcance del usuario; un id de otra delegación no se exporta. No hay eliminación masiva: cada eliminación sigue siendo individual y con confirmación.
+- **Panel "Filtros" de cada módulo** (`CrudConfig.panel`, clases `FiltroOpciones`, `FiltroReciente`, `FiltroCondiciones` y `FiltroRangoFechas` en `core/crud.py`). Todos los módulos filtran por **última modificación** (`updated_at` de `BaseModel`: hoy, últimos 7 días, últimos 30 días o hace más de 30 días). Además, cada uno tiene sus filtros propios:
+
+  | Módulo | Filtros del panel |
+  | --- | --- |
+  | Actividades | última modificación, período, delegación, tipo de actividad, funcionario, rango de fechas |
+  | Atenciones sociales | última modificación, período, delegación, funcionario, rango de fechas de la gestión |
+  | Evidencias | **última modificación** (más la columna ordenable "Modificada"), período, delegación, tipo de actividad, revisada por, con o sin archivo, rango de fechas de registro |
+  | Compromisos | última modificación, delegación, responsable, rango de vencimiento |
+
+  Cada valor se valida contra una lista blanca: opciones conocidas o fechas ISO válidas. Un valor inválido se ignora. Las opciones salen del alcance del usuario: un administrador de delegación solo ve los funcionarios y revisores de su delegación, y no ve el filtro de delegación porque tiene una sola. Los filtros aplicados aparecen como **chips**; cada chip se quita por separado y los demás filtros se conservan. Las pestañas, los conteos, la paginación y el Excel respetan los mismos filtros.
+- **Admin:** las listas de actividades, atenciones, evidencias, compromisos y funcionarios suman el filtro "Por última modificación" (`UltimaModificacionFilter`), junto con los filtros por fecha (registro, vencimiento o gestión) y por tipo de actividad.
+- **Columnas visibles:** el botón "Columnas" oculta o muestra columnas. La preferencia se guarda en el navegador (`localStorage`); si el navegador no la permite, se ven todas.
+- **Etiquetas de estado, iniciales y acciones con íconos:** el estado se muestra con color y texto, nunca solo con color. La columna de acciones queda fija a la derecha cuando la tabla se desplaza, y en celular cada fila pasa a ser una tarjeta.
+- El JavaScript (`static/js/listado.js`) no usa atributos `on…`. Todo lo que hace es de interfaz; los permisos se vuelven a verificar en el servidor.
+- **Django Admin:** el listado del Admin usa el mismo lenguaje visual: etiquetas de estado (`ScopedModelAdmin.get_list_display` reemplaza `status`, `validation_status` y `new_status` por una etiqueta que sigue ordenando por el campo), encabezados sin mayúsculas, fila marcada en color, barra de acciones fija y paginación en casillas (`core/static/admin/css/custom_admin.css`).
+
+### Revisión de evidencias y estado de la actividad
+
+- Aprobar o rechazar una evidencia pasa **siempre** por `registrar_revision()` (`evidencias/services.py`): formulario web del verificador, acción masiva, formulario de cambio y alta de `Validation` en el Admin. Esa función guarda el estado, asigna el revisor, crea la `Validation` y deja una traza en `AuditLog`. Una `Validation` ya registrada no se edita.
+- **Regla del estado de la actividad:** una actividad queda **aprobada** si tiene al menos una evidencia aprobada; **pendiente** si alguna evidencia espera revisión (por ejemplo, la corrección de una rechazada) o si no tiene evidencias; y **rechazada** solo si todas sus evidencias fueron rechazadas. Así una actividad rechazada se recupera cuando el funcionario sube una evidencia corregida y el verificador la aprueba. Se recalcula sola (señal `post_save` de `Evidence`) al revisar, agregar, eliminar o restaurar una evidencia, y por eso el dashboard avanza con cada aprobación.
+- **Período cerrado:** se declara una sola vez por modelo con `bloqueo_modificacion`. La actividad y todo lo que depende de ella (evidencias, gestiones y validaciones) quedan congelados en la web y en el Admin, también para el superusuario. Las listas de los formularios no ofrecen actividades cerradas.
+- **Lo eliminado lo sigue viendo el administrador general:** cuando un administrador de delegación elimina una actividad, evidencia, gestión o compromiso (borrado lógico), deja de verlo él y su delegación, pero el superadmin lo sigue viendo en el Admin: columna «Registro» (activo o «Eliminado el …»), filtro «estado del registro» (activos, eliminados o todos) y ficha en solo lectura, con sus archivos. Además puede **restaurarlo** con la acción «Restaurar los registros eliminados seleccionados», que recupera también lo que se eliminó junto con él. Cada eliminación y restauración queda en la traza de auditoría con el usuario y la fecha.
+- **Actividad aprobada:** el funcionario ya no la modifica, ni le agrega evidencias, ni edita sus gestiones sociales; un administrador sí. Se declara en el modelo con `bloqueo_funcionario` y la aplica la misma política única (`core/admin_utils.modificables`), en la web y en el Admin.
+- **Fecha de la actividad:** debe estar dentro de su período y no puede ser futura (se registran actividades ya realizadas).
+- **Revisión de evidencias:** rechazar exige indicar el motivo, para que el funcionario sepa qué corregir. El verificador solo cambia estado y resultado: no reasigna la evidencia a otra actividad ni reemplaza el archivo. El estado de validación de la actividad es de solo lectura también en el Admin, porque se deriva de las evidencias.
+- **Archivos en el Admin:** el formulario de Evidencias y la evidencia en línea dentro de una actividad validan tipo, tamaño y contenido igual que la web (antes el Admin aceptaba cualquier archivo). Una imagen que declara millones de píxeles se rechaza en vez de agotar la memoria.
+- **Seguimiento de compromisos:** registrar un seguimiento cambia el compromiso al «estado nuevo» indicado; si queda realizado sin observaciones, la descripción del seguimiento se usa como tales.
+- **Funcionario desactivado** (`Employee.is_active=False`): no puede ingresar, aunque su usuario siga activo, y una sesión ya abierta recibe 403.
+- **Metas de un período cerrado:** no se modifican, porque cambiarían el cumplimiento histórico.
+- **Traza de auditoría:** en el Admin es de solo lectura (no se crea, edita ni borra a mano).
+
+### Fechas de auditoría y traza de cambios (`BaseModel`)
+
+Como pide la Clase 2 de la Unidad 2, los campos de auditoría están centralizados en modelos abstractos de `core/models.py` (no crean tabla propia):
+
+| Modelo base | Campos | Lo heredan |
+| --- | --- | --- |
+| `TimeStampedModel` | `created_at` (`auto_now_add`), `updated_at` (`auto_now`) | Tablas maestras: `Delegation`, `Position`, `ActivityType`, `Period`, `Parameter`, `Employee`, `Goal`, `Weighting`, `Indicator` |
+| `BaseModel` (hereda de `TimeStampedModel`) | + `deleted_at` y el borrado lógico | Entidades operacionales: `Activity`, `SocialCase`, `Evidence`, `Validation`, `Commitment`, `CommitmentFollowUp` |
+
+Las tablas maestras no tienen borrado lógico: se desactivan con `is_active` y están protegidas con `on_delete=PROTECT` (un borrado lógico se saltaría esa protección).
+
+- **Las fechas dicen cuándo; la traza dice quién y qué.** `updated_at` no sabe quién editó, por eso cada creación y modificación también queda en `AuditLog` con el usuario y los valores anteriores y nuevos (`changes = {campo: [antes, después]}`), registrados en los dos lugares por donde se escribe: el CRUD web (`CrudFormView.form_valid`, `core/crud.py`) y el Admin (`ScopedModelAdmin.save_model` / `save_formset` y `AuditarCambiosAdmin`, `core/admin_utils.py`). El único punto de entrada es `registrar_en_auditoria()`.
+- `save(update_fields=[...])` agrega `updated_at` automáticamente (lo hace `TimeStampedModel.save`). `QuerySet.update()` no aplica `auto_now`, por eso las tres actualizaciones masivas del proyecto fijan `updated_at` a mano.
+- En el Admin, `created_at` y `updated_at` se ven en la ficha de cada registro en solo lectura.
+- Las migraciones `00xx_fechas_de_auditoria` asignan a los registros existentes la fecha de la migración.
+
+### Borrado lógico (`deleted_at`)
+
+`Activity`, `SocialCase`, `Evidence`, `Validation`, `Commitment` y `CommitmentFollowUp` heredan de `core.models.BaseModel` (los managers están en `core/soft_delete.py`):
+
+- `delete()` (desde las vistas, el Admin o un QuerySet) **no borra la fila**: marca `deleted_at` y propaga la marca a los hijos (por ejemplo, una actividad a sus evidencias y atenciones).
+- `Modelo.objects` devuelve solo registros activos y es el que usan listados, dashboard, Admin y exportaciones. `Modelo.all_objects` ve también los eliminados. Es el manager por defecto para que Django siga detectando valores únicos ocupados por registros eliminados, en vez de fallar con un error 500.
+- Las llaves foráneas usan `limit_choices_to={'deleted_at__isnull': True}`, así los formularios no ofrecen registros eliminados.
+- `restore()` recupera un registro; `hard_delete()` lo borra físicamente (no se usa en el flujo normal).
+
+### Archivos y confirmaciones (Clase 8)
+
+Solo **evidencias** recibe archivos. Actividades, atenciones, compromisos y validaciones no tienen campo de archivo: su respaldo es una evidencia. Las reglas están en un solo lugar, `validar_archivo_subido()` en `evidencias/archivos.py`, y las aplican el formulario web y el Admin (incluida la evidencia en línea dentro de una actividad):
+
+| Control | Qué se revisa |
+| --- | --- |
+| Tamaño | Máximo 2 MB y no vacío. nginx corta antes con `client_max_body_size 3M`, y Django acepta como máximo 5 archivos por petición. |
+| Extensión | Solo `.jpg`, `.jpeg`, `.png` y `.pdf`. No se considera el tipo que declara el navegador. |
+| Contenido real de imágenes | Pillow la abre y verifica, y el formato debe **coincidir con la extensión** (un `.png` con contenido JPEG se rechaza). Se rechazan las imágenes de más de 50 megapíxeles (bombas de descompresión). |
+| Imagen re-codificada | Se vuelve a guardar con Pillow: se eliminan los **metadatos EXIF (ubicación GPS)** y cualquier contenido escondido al final del archivo (archivos «políglotas»). La orientación de la foto se conserva. |
+| Contenido real de PDF | Estructura completa: cabecera `%PDF-`, al menos una página, `xref` y `%%EOF`. Se rechazan los PDF **cifrados** y los que contienen `/JavaScript`, `/JS`, `/Launch`, archivos incrustados, `/RichMedia` o XFA, también cuando están escritos con `#xx` u ocultos en flujos comprimidos (`/ObjStm`). Se descomprime como máximo 20 MB. |
+| Nombre | El nombre enviado se descarta y se guarda con un nombre UUID en `media/evidencias/AAAA/MM/`. |
+
+**Entrega protegida:** los archivos no se publican como carpeta. `MEDIA_URL` es `/archivos/`, una vista (`evidencias.views.archivo_evidencia`) que exige sesión, el permiso `view_evidence` y que la evidencia sea de la delegación del usuario (si no, responde 404, como el CRUD). Una evidencia eliminada solo la ve el administrador general. La vista responde con el tipo según la extensión ya validada, `X-Content-Type-Options: nosniff` y `Cache-Control: private, no-store`. Por eso conocer o compartir el enlace no basta para descargar el respaldo de otra delegación. nginx ya no expone `/media/`.
+Al reemplazar el archivo de una evidencia, el anterior se borra (`evidencias/signals.py`). Al eliminarla, el borrado es lógico y el archivo se conserva; solo `hard_delete()` lo borra del disco.
+SweetAlert2 (`static/js/confirmar.js`) pide confirmación antes de eliminar. La librería (v11.26.25, licencia MIT) se sirve desde `static/vendor/sweetalert2/`, así que la demo no depende de un CDN; si aun así no cargara, se usa la confirmación nativa del navegador y nunca se elimina sin preguntar. Es solo una ayuda visual: Django sigue exigiendo POST, CSRF, login y permisos.
+
+## API REST con JWT (Evaluación 3 · Programación Back End)
+
+API JSON con **Django REST Framework 3.18.1** y **Simple JWT 5.5.1** sobre los mismos modelos y la misma base de datos de la web. Todo el código está en la app `api/`.
+
+| Pieza | Archivo |
+| --- | --- |
+| Serializers con campos explícitos | `api/serializers.py` |
+| ViewSets (CRUD y solo lectura) | `api/views.py` |
+| Rutas bajo `/api/` (router y token) | `api/urls.py` · montadas en `config/urls.py` |
+| Roles de la API (permiso por defecto) | `api/permisos.py` · `PermisoPorRolAPI` |
+| Paginación | `api/paginacion.py` · `PaginacionSGR` |
+| Token con límite de intentos | `api/autenticacion.py` |
+| Usuarios de prueba de la API | `api/usuarios.py` · comando `crear_usuarios_api` |
+| Configuración | `config/settings.py` · `REST_FRAMEWORK` y `SIMPLE_JWT` |
+| Pruebas automáticas | `api/tests.py` (27 pruebas) |
+| Matriz contra el servidor | `scripts/probar_api.py` |
+| Colección de Apidog | `docs/api/SGR_API_JWT.postman_collection.json` |
+
+### Los seis modelos y sus relaciones
+
+| Tipo | Modelo (tabla) | Recurso | Relaciones | Registros con `--volumen 1000` |
+| --- | --- | --- | --- | --- |
+| Principal | `Activity` (`activity`) | `/api/actividades/` | → `Employee`, `Delegation`, `Period`, `ActivityType`; ← evidencias y atenciones | ≈ 1.008 |
+| Principal | `SocialCase` (`social_case`) | `/api/atenciones/` | → `Activity` (máximo 3 gestiones por actividad social) | ≈ 400 |
+| Principal | `Commitment` (`commitment`) | `/api/compromisos/` | → `Delegation`, `Employee` (responsable); ← seguimientos | ≈ 254 |
+| Principal | `Evidence` (`evidence`) | `/api/evidencias/` | → `Activity`; ← validaciones | ≈ 800 |
+| Operacional | `Validation` (`validation`) | `/api/validaciones/` | → `Evidence`, `User` (verificador) | ≈ 590 |
+| Operacional | `CommitmentFollowUp` (`commitment_follow_up`) | `/api/seguimientos/` | → `Commitment`, `Employee` | ≈ 250 |
+
+Total de los seis modelos: **más de 3.000 registros**. El total exacto lo imprime `seed_data` al terminar.
+
+### Endpoints y métodos
+
+| Método | Ruta | Quién | Respuesta |
+| --- | --- | --- | --- |
+| POST | `/api/token/` | Cualquiera con usuario y clave | 200 `{access, refresh}` · 401 si la clave es incorrecta o el usuario está bloqueado |
+| POST | `/api/token/refresh/` | Quien tenga un `refresh` válido | 200 `{access}` |
+| GET | `/api/<principal>/` y `/api/<principal>/<id>/` | Administrador y operador | 200 · 404 si el id no existe o está eliminado |
+| POST | `/api/<principal>/` | Administrador | 201 · 400 si los datos no cumplen las reglas |
+| PUT / PATCH | `/api/<principal>/<id>/` | Administrador | 200 · 400 |
+| DELETE | `/api/<principal>/<id>/` | Administrador | 204 |
+| GET | `/api/validaciones/`, `/api/seguimientos/` y su detalle | Administrador y operador | 200 · los demás métodos dan 405 |
+
+Los recursos principales son `actividades`, `atenciones`, `compromisos` y `evidencias`.
+
+- **Borrado lógico:** DELETE marca `deleted_at` y responde **204**. Después, el registro ya no aparece en las listas y su detalle responde 404. Los hijos se eliminan con él; por ejemplo, las evidencias y gestiones de una actividad. Es la regla del dominio: un respaldo municipal no se pierde y el administrador general puede restaurarlo desde el Admin. Cada alta, cambio y eliminación queda en la traza de auditoría, con el detalle «API REST».
+- **Filtros por relación:** `?activity=<id>` en atenciones y evidencias; `?employee=`, `?delegation=`, `?period=` y `?activity_type=` en actividades; `?delegation=` y `?responsible=` en compromisos; `?evidence=` en validaciones; `?commitment=` en seguimientos.
+- **Evidencias:** se crean con `multipart/form-data` (`activity`, `description` y `file`, de tipo JPG, PNG o PDF de hasta 2 MB, validado por su contenido real). El estado de una evidencia lo cambia solo la revisión del verificador, así que en la API es de solo lectura.
+
+### Roles (JWT)
+
+| Usuario (normal, no superusuario) | Grupo | Puede |
+| --- | --- | --- |
+| `api_admin` | `API Administrador` | GET, POST, PUT, PATCH y DELETE |
+| `api_operador` | `API Operador` | Solo GET (POST, PUT, PATCH o DELETE responden **403**) |
+| `api_sin_rol` | (ninguno) | Obtiene token, pero cada recurso responde **403** |
+
+- **Sin token**, o con un token inválido o vencido, la respuesta es **401**: `JWTAuthentication` es el primer autenticador. El token se envía como `Authorization: Bearer <access>`.
+- **Duración:** `access` dura 30 minutos y `refresh`, 24 horas (`JWT_ACCESS_MINUTOS` y `JWT_REFRESH_HORAS` en el `.env`).
+- `/api/token/` aplica el mismo bloqueo por intentos que el login web (5 por usuario y 20 por IP en 15 minutos) y la misma respuesta genérica.
+- Los usuarios de la web (`admin_centro`, `verificador_leia`…) no tienen rol de API y reciben 403.
+
+### Validaciones (400)
+
+| Tipo | Ejemplo | Respuesta |
+| --- | --- | --- |
+| De campo | Compromiso con `title` de menos de 5 caracteres | `{"title": ["El título debe tener al menos 5 caracteres."]}` |
+| De campo | Actividad con `date` futura, o `number` repetido | `{"date": [...]}` · `{"number": ["Ya existe una actividad con este número."]}` |
+| Regla de negocio | Compromiso cuyo responsable es de otra delegación | `{"responsible": ["El responsable debe pertenecer a la delegación del compromiso."]}` |
+| Regla de negocio | Actividad en un período cerrado; gestión sobre una actividad que no es de atención social | `{"period": [...]}` · `{"activity": [...]}` |
+| Contenido | Evidencia con un archivo que no es lo que dice su extensión | `{"file": [...]}` |
+
+Las reglas de negocio son las del modelo (`clean()`). La API las ejecuta sobre el registro como quedaría, también en un PATCH, así que rechaza lo mismo que la web. Un id inexistente o eliminado responde **404** con `{"detail": "Registro no encontrado."}`.
+
+### Paginación
+
+Todas las listas devuelven 20 registros por página: `{"count", "next", "previous", "results"}`. Ninguna lista entrega los más de 1.000 registros en una sola respuesta.
+
+- Otra página: `GET /api/actividades/?page=2`.
+- Otro tamaño: `?page_size=50` (máximo 100).
+
+### Preparar y cargar los datos
+
+1. Siga los pasos 1 a 5 de «Cómo levantar el proyecto».
+2. En el `.env`, defina `API_PASSWORD` con la clave de los tres usuarios de la API. Si la deja vacía, se usa `DEMO_PASSWORD`, y si también está vacía, se generan claves al azar y se muestran una sola vez.
+3. Ejecute:
+   ```bash
+   python manage.py migrate
+   python manage.py seed_data --volumen 1000   # demo + más de 3.000 registros de dominio + usuarios api_*
+   python manage.py runserver
+   ```
+   Si solo quiere crear o recrear los usuarios de la API: `python manage.py crear_usuarios_api`.
+
+**Sin MariaDB (por ejemplo, en el laboratorio):** ponga `DB_ENGINE=django.db.backends.sqlite3` en el `.env`. La base queda en `db.sqlite3`, que no se versiona. Igual hay que instalar `requirements.txt`; en Linux, `mysqlclient` necesita `libmariadb-dev` para instalarse.
+
+### Uso de Apidog
+
+1. En Apidog: **Importar → Postman** → `docs/api/SGR_API_JWT.postman_collection.json`.
+2. En las variables de la colección:
+   - `baseUrl`: por defecto `http://127.0.0.1:8000`;
+   - `clave_api`: la clave de los usuarios `api_*`, sin guardarla en la exportación.
+3. Ejecute las carpetas en orden. Cada solicitud verifica su estado esperado, y los ids se toman de las respuestas.
+
+| Carpeta | Contenido |
+| --- | --- |
+| 01 | Token, renovación y clave incorrecta |
+| 02 | Sin token (401) |
+| 03 | Operador (200 y 403) |
+| 04 | Sin rol (403) |
+| 05 | Ids de referencia |
+| 06–09 | CRUD de los 4 recursos principales (201, 200, 200, 204, 404) |
+| 10 | Operacionales |
+| 11 | Errores (400, 400, 404) |
+| 12 | Paginación (dos páginas distintas) |
+| 13 | Limpieza |
+
+4. En «Evidencia: crear», seleccione un archivo JPG, PNG o PDF.
+5. Las capturas no deben mostrar el token ni la clave.
+
+Verificación sin Apidog, con el servidor levantado:
+```bash
+SGR_CLAVE_API='<clave de los usuarios api_*>' python scripts/probar_api.py              # 48 casos
+SGR_CLAVE_API='<clave>' python scripts/probar_api.py --markdown > matriz_api.md         # misma matriz en tabla
+python manage.py test api                                                               # 27 pruebas
+```
+
+## Despliegue en AWS Academy (EC2 + nginx + gunicorn)
+
+Arquitectura: **nginx** (puerto 80) sirve `/static/` y reenvía el resto (incluidos los archivos subidos, que pasan por la vista protegida `/archivos/`) a **gunicorn** por un socket Unix. **systemd** mantiene gunicorn en ejecución. La base de datos es **RDS** (MySQL 8.4 / MariaDB 10.11 o superior) o **MariaDB 10.11 en la misma EC2**. Los archivos están en `deploy/`.
+
+> ⚠️ Django 6.1 exige **Python 3.12+** y **MySQL 8.4+ / MariaDB 10.11+**. El script sirve para **Amazon Linux 2023** (instala `python3.12` y `mariadb1011-server`, porque su `python3` es la 3.9) y para **Ubuntu Server 24.04** (trae Python 3.12 y MariaDB 10.11). Detecta el sistema solo (`dnf` o `apt`) y usa el usuario de la instancia (`ec2-user` o `ubuntu`) y el grupo de nginx (`nginx` o `www-data`). Si el Learner Lab no ofrece esas versiones en RDS, use la opción `--db-local`.
+
+1. **Learner Lab → AWS Console → EC2 → Launch instance:** **Amazon Linux 2023** (o Ubuntu Server 24.04 LTS), `t3.small` (o `t2.small`) y el key pair `vockey`.
+   *Security group:* entrada **22** (solo su IP) y **80** (0.0.0.0/0). Si usa RDS, el security group de RDS debe permitir **3306 solo desde el security group de la EC2**.
+2. Conectarse (`ssh -i labsuser.pem ec2-user@<IP-publica>` en Amazon Linux, `ubuntu@<IP-publica>` en Ubuntu) y ejecutar:
+   ```bash
+   curl -O https://raw.githubusercontent.com/<usuario>/<repo>/<rama>/deploy/setup_ec2.sh
+   bash setup_ec2.sh https://github.com/<usuario>/<repo>.git <rama> --db-local   # o sin --db-local para RDS
+   ```
+   El script instala los paquetes, clona en `/srv/sgr` y crea el entorno virtual. También genera un `.env` de producción con `SECRET_KEY` aleatoria, `DEBUG=False` y la IP en `ALLOWED_HOSTS`/`CSRF_TRUSTED_ORIGINS`. Después ejecuta `migrate`, `collectstatic` y `seed_data --volumen`, y deja gunicorn y nginx activos.
+   Con RDS, la primera ejecución se detiene para que complete `DB_HOST`, `DB_USER` y `DB_PASSWORD` en `/srv/sgr/.env`; luego se vuelve a ejecutar.
+3. **Contraseñas de demo:** páselas al script como variable de entorno: `DEMO_PASSWORD='<clave nueva>' bash setup_ec2.sh ...`. El script la guarda en `/srv/sgr/.env`. Si no la pasa, `seed_data` genera contraseñas aleatorias y las muestra **una sola vez** en la salida: anótelas. No reutilice contraseñas antiguas del historial de Git.
+4. **Correo de recuperación:** con el backend de consola, el código aparece en `sudo journalctl -u gunicorn-sgr -f`. Para recibirlo por correo, configure SMTP (por ejemplo Mailtrap) con `EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend` y `EMAIL_HOST`/`EMAIL_PORT`/`EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD`, y luego `sudo systemctl restart gunicorn-sgr`.
+
+**Configuración de nginx (`deploy/nginx-sgr.conf`):** `setup_ec2.sh` la copia en `/etc/nginx/conf.d/sgr.conf` en Amazon Linux y en `/etc/nginx/sites-available/sgr` (enlazada en `sites-enabled`) en Ubuntu. Esto hace:
+
+| Bloque | Qué hace |
+| --- | --- |
+| `client_max_body_size 3M` | Rechaza (413) cualquier petición de más de 3 MB antes de que llegue a Django: evidencias de hasta 2 MB más el resto del formulario. |
+| `location /static/` | Sirve los archivos de `collectstatic` desde `/srv/sgr/staticfiles/`, con caché de 7 días. |
+| `location /media/` → `return 404` | **La carpeta de archivos subidos no se publica.** Las evidencias se descargan por `/archivos/…`, que pasa a Django y exige sesión, permiso y delegación (ver «Archivos y confirmaciones»). |
+| `location /` | Reenvía todo lo demás, incluido `/archivos/`, a gunicorn por el socket `/run/sgr/gunicorn.sock`, con las cabeceras `Host`, `X-Forwarded-For` y `X-Forwarded-Proto`. |
+
+**Actualizar tras un nuevo push:**
+```bash
+cd /srv/sgr && git pull && .venv/bin/pip install -r requirements.txt
+.venv/bin/python manage.py migrate && .venv/bin/python manage.py collectstatic --noinput
+sudo systemctl restart gunicorn-sgr
+```
+
+**Si el push cambió `deploy/nginx-sgr.conf`**, `git pull` no la aplica: hay que copiarla y recargar nginx. Eso pasa, por ejemplo, con el cambio que dejó de publicar `/media/`; mientras no se copie, los archivos siguen accesibles sin sesión para quien tenga el enlace.
+```bash
+cd /srv/sgr
+# Amazon Linux 2023
+sudo cp deploy/nginx-sgr.conf /etc/nginx/conf.d/sgr.conf
+# Ubuntu 24.04 (en vez de la línea anterior)
+sudo cp deploy/nginx-sgr.conf /etc/nginx/sites-available/sgr
+sudo nginx -t && sudo systemctl reload nginx   # reload no corta las conexiones abiertas
+```
+
+Para comprobarlo desde su computador (debe responder `404` y `302`):
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://<IP-publica>/media/evidencias/cualquiera.pdf     # 404: carpeta no publicada
+curl -s -o /dev/null -w '%{http_code}\n' http://<IP-publica>/archivos/evidencias/cualquiera.pdf  # 302: pide iniciar sesión
+```
+
+**Antes de la revisión, volver a cargar los datos con la fecha del día** (una base cargada antes conserva sus períodos y metas, ver «Fechas relativas al día de la carga»):
+```bash
+cd /srv/sgr
+.venv/bin/python manage.py flush --noinput
+.venv/bin/python manage.py seed_data --volumen
+.venv/bin/python manage.py revisar_archivos --borrar-huerfanos
+sudo systemctl restart gunicorn-sgr
+```
+
+**Learner Lab:** la sesión se apaga a las 4 horas y, al reiniciarse, la EC2 puede cambiar de IP pública. Actualice `ALLOWED_HOSTS` y `CSRF_TRUSTED_ORIGINS` en `.env` y reinicie gunicorn, o asocie una Elastic IP. Antes de la revisión, inicie el lab y verifique la URL.
+
+**Si usa RDS:** en el *parameter group*, `character_set_server = utf8mb4` y `collation_server = utf8mb4_unicode_ci`. Para conexión cifrada, descargue `global-bundle.pem` de AWS y apunte `DB_SSL_CA` a esa ruta. Con HTTPS, active `COOKIE_SECURE=True` y `BEHIND_HTTPS_PROXY=True`.
+
+**Una cuenta no puede entrar (siempre ve «Usuario o contraseña incorrectos.»):** `cd /srv/sgr && .venv/bin/python manage.py diagnosticar_acceso <usuario o correo>`.
+
+**Diagnóstico:** `sudo systemctl status gunicorn-sgr`, `sudo journalctl -u gunicorn-sgr -n 50`, `sudo nginx -t` y `sudo tail /var/log/nginx/error.log`. Para ver la configuración que nginx está usando realmente: `sudo nginx -T | grep -A3 "location /media/"` (debe mostrar `return 404`).
+- **413 Request Entity Too Large** al subir una evidencia: el archivo supera 3 MB y nginx lo cortó antes de llegar a Django (el límite de la aplicación es 2 MB).
+- **502 Bad Gateway:** gunicorn no está corriendo o nginx no puede usar el socket: revise `sudo systemctl status gunicorn-sgr`.
 
 ## Cuentas de prueba
 
-Cuentas de demostración creadas por `seed_data` (no personales; contraseñas ficticias solo para uso académico):
+`seed_data` crea estas cuentas de demostración. **Las contraseñas no están en el repositorio**: se definen en el `.env` con `DEMO_PASSWORD` (común a todas) o `DEMO_PASSWORD_<USUARIO>` (por ejemplo `DEMO_PASSWORD_ADMIN_CENTRO`). Si el `.env` no las define, `seed_data` genera contraseñas aleatorias y las muestra **una sola vez** en la terminal. Las contraseñas se entregan al docente en la demostración.
 
-| Usuario | Contraseña | Rol / grupo | Alcance en el Admin |
-| --- | --- | --- | --- |
-| `admin_sgr` | `Admin#2026SGR` | Administrador (superusuario) | Acceso total a todas las delegaciones y modelos |
-| `funcionario_centro` | `Centro#2026SGR` | Funcionario — grupo `Funcionarios` (Delegación Centro) | Solo ve/edita actividades, evidencias, atenciones sociales, compromisos y seguimientos de **Centro** |
-| `funcionario_norte` | `Norte#2026SGR` | Funcionario — grupo `Funcionarios` (Delegación Norte) | Solo ve/edita registros de **Norte** |
-| `verificador_leia` | `Verifica#2026SGR` | Verificador — grupo `Verificadores` | Ve evidencias de todas las delegaciones; único rol con permiso para ejecutar la acción "Aprobar evidencias seleccionadas" |
+| Usuario | Rol / grupo | Alcance |
+| --- | --- | --- |
+| `admin_sgr` | Administrador general (superusuario) | Acceso total a todas las delegaciones y modelos |
+| `admin_centro` | Administrador de delegación — grupo `Administradores` (Centro) | Gestiona actividades, evidencias, compromisos y funcionarios **solo de Centro**; no ve nada de Norte ni administra usuarios |
+| `admin_norte` | Administrador de delegación — grupo `Administradores` (Norte) | Igual que el anterior, **solo Norte** |
+| `funcionario_centro` | Funcionario — grupo `Funcionarios` (Centro) | Ve las actividades de **Centro**, pero solo registra y edita las **propias** (las ajenas dan 403); no puede eliminar |
+| `funcionario_norte` | Funcionario — grupo `Funcionarios` (Norte) | Igual, solo **Norte** |
+| `verificador_leia` | Verificador — grupo `Verificadores` | Ve evidencias de todas las delegaciones y las aprueba |
 
 ## Comandos de verificación
 
-Con el entorno activado y desde la raíz del proyecto:
-
 ```bash
-# Comprueba la configuración del proyecto
-python manage.py check
-
-# Aplica las migraciones
-python manage.py migrate
-
-# Carga datos de prueba idempotentes
-python manage.py seed_data
-
-# Ejecuta las pruebas automáticas (todas las apps)
-python manage.py test
-
-# Levanta el servidor de desarrollo
-python manage.py runserver
+python manage.py check                      # configuración
+python manage.py makemigrations --check     # modelos y migraciones sincronizados
+python manage.py migrate                    # aplica migraciones
+python manage.py seed_data --volumen        # demo + 1.600 registros (idempotente)
+python manage.py revisar_archivos           # archivos de evidencias faltantes, dañados o huérfanos
+python manage.py test                       # pruebas automáticas
+python manage.py shell < scripts/verificacion_e2e.py  # recorre todos los puntos pedidos como cada rol (no deja cambios)
+python manage.py runserver                  # servidor de desarrollo
 ```
 
-## Revisión en vivo (laboratorio)
+## Guion de demostración (según la rúbrica)
 
-Secuencia de la demostración:
+| # | Criterio | Qué mostrar |
+| --- | --- | --- |
+| 1 | Modelo, Admin y nomenclatura | Admin con `admin_sgr`: maestras y operacionales, tablas en inglés (`SHOW TABLES`), inline de evidencias y acción "Aprobar evidencias seleccionadas" |
+| 2 | Autenticación y recuperación | Login y logout; "¿Olvidó su contraseña?" → código de 6 dígitos (en la terminal o en Mailtrap) → nueva clave → reusar el código falla |
+| 3 | Seguridad de contraseña | Intentar `debil123` o una clave sin símbolo: se rechaza; debe coincidir en los dos campos |
+| 4 | Usuarios, permisos y scoping | `admin_centro` y `admin_norte` ven solo su delegación; `funcionario_centro` no tiene "Eliminar" y recibe 403 si fuerza la URL; `verificador_leia` recibe 403 en Compromisos |
+| 5 | CRUD y validaciones | Crear y editar en el modal: número duplicado, período cerrado, gestión 4, vencimiento en el pasado, "realizado" sin observaciones |
+| 6 | Archivos | Subir PNG/PDF válido; rechazo de `.exe`, PNG falso y archivo de más de 2 MB; miniatura en el listado |
+| 7 | SweetAlert2 + borrado lógico | Eliminar con confirmación; el registro desaparece del listado, pero sigue en la base con `deleted_at` |
+| 8 | Paginación y sesión | Elegir 5 → navegar a otro listado → se mantiene; `?page_size=999` se ignora |
+| 9 | Excel | "Exportar Excel" como `admin_centro`: solo Centro, sin eliminados |
+| 10 | 1.000 datos | `seed_data --volumen` y el total que muestra; la paginación en Actividades |
+| 11 | Despliegue | Todo lo anterior desde la URL pública de AWS |
 
-1. Clonar el repositorio entregado.
-2. Crear/activar el entorno virtual e instalar dependencias.
-3. Configurar `.env` a partir de `.env.example`.
-4. Ejecutar `migrate`.
-5. Ejecutar `seed_data`.
-6. Ingresar con `admin_sgr` y mostrar el Admin completo: maestras (`Delegacion`, `Cargo`, `TipoActividad`, `Periodo`, `Parametro`), operativas de todas las apps, el Inline de evidencias dentro de una actividad, la acción "Aprobar evidencias seleccionadas" y la validación controlada (por ejemplo, intentar registrar una actividad en el período `2026-Q1 (cerrado)`).
-7. Cerrar sesión e ingresar con `funcionario_centro` para demostrar que solo ve/edita registros de Delegación Centro (no ve los de Norte).
-8. Ejecutar sobre datos cargados: búsqueda, filtros, ordenamiento, Inline, acción personalizada, validación y scoping/rol.
+## Flujo de trabajo con Git
 
-## Flujo de trabajo en 4 pasos
+- `main` contiene solo el primer push de inicialización. El desarrollo se hace en ramas `feature/*` (por ejemplo `feature/soft-delete`, `feature/crud-excel-paginacion` o `feature/deploy-aws`), que se integran con `git merge --no-ff` para que el historial muestre cada integración, y luego se llevan a `main` mediante Pull Request.
+- `.env`, entornos virtuales, `media/`, `staticfiles/` y la base de datos no se versionan (`.gitignore`). La plantilla de configuración es `.env.example`.
 
-La implementación se realizó en **4 pasos secuenciales** (ver `INSTRUCCIONES_AGENTE_IMPLEMENTACION_SGR.md`):
+### Reglas de negocio de la guía (RN-001 a RN-013)
 
-1. **P1 — Base, configuración y dominio:** 9 apps, `.env`/settings, modelos y migraciones.
-2. **P2 — Admin Básico + Admin Pro + Seguridad:** ModelAdmins, Inline/acción/validaciones y scoping por delegación (`core/admin_utils.py`) + grupos/permisos (`funcionarios/security.py`).
-3. **P3 — Datos de demostración reproducibles:** seeders por app + comando `seed_data`, cuentas de prueba documentadas arriba.
-4. **P4 — Verificación integral, informe y entrega.**
+| Regla | Estado | Dónde |
+| --- | --- | --- |
+| RN-001 Ponderadores de un cargo y período suman 100 % | Cumple. Si no suman 100, el dashboard no calcula el cumplimiento de ese cargo y lo avisa; el Admin de Metas muestra la suma por cargo y advierte al guardar | `medicion/services.py` (`suma_ponderadores`), `dashboard/services.py`, `medicion/admin.py` |
+| RN-002 Meta mayor que cero | Cumple | `medicion/models.py` (validación de `Goal`) |
+| RN-003 Avance = actividades válidas del período | Cumple (solo actividades aprobadas del período) | `dashboard/services.py` |
+| RN-004 % cumplimiento = avance / meta × 100 | Cumple | `medicion/services.py` (`calcular_cumplimiento_ponderado`) |
+| RN-005 Ponderado con tope | Cumple, tope configurable por período (`Period.max_cap`), fijado en **100 %** | `core/models.py`, `medicion/services.py` |
+| RN-006 Umbral colectivo configurable | Cumple (`Period.min_threshold`, 80 %); el dashboard dice si el grupo lo alcanza | `core/models.py`, `templates/dashboard/index.html` |
+| RN-007 Meta esperada al día | Cumple (días transcurridos desde el inicio / días del período) | `medicion/services.py` |
+| RN-008 Semáforo verde / ámbar (≥ 60 % de lo esperado) / rojo | Cumple | `medicion/services.py` (`calcular_semaforo`) |
+| RN-009 Solo validación aprobada suma; rechazada o anulada no | Cumple | `evidencias/services.py` (`estado_segun_evidencias`) |
+| RN-010 Código de evidencia único e inmutable | Cumple: lo genera el sistema (`EV-AAAAMM-XXXXXXXX`) y no se puede cambiar | `actividades/models.py` (`generar_codigo_evidencia`, `clean`) |
+| RN-011 Felicitaciones, reclamos y ajustes parametrizables | **Pendiente a propósito**: la guía pide no fijar valores hasta la definición oficial. Los parámetros (`Parameter`) ya existen para cargarlos | `core/models.py` |
+| RN-012 Hasta 3 gestiones por atención, con fecha y resultado | Cumple (gestión 1 a 3, fecha no futura ni anterior a la actividad, resultado) | `actividades/models.py` (`SocialCase`) |
+| RN-013 Período cerrado no se modifica salvo reapertura auditada | Cumple: bloquea actividades, evidencias y metas; cerrar, reabrir y cambiar configuración queda en la auditoría | `core/admin_utils.py` (`AuditarCambiosAdmin`), `core/admin.py` |
 
-> **Los commits los realiza el humano a cargo.** El agente de IA desarrolla y deja los cambios en el árbol de trabajo, pero no ejecuta operaciones Git de escritura (commit, push, ramas ni PRs).
+Las pruebas de cada regla están en `core/tests_reglas_negocio.py` (`ReglasDeLaGuiaTests`).
 
-## Referencias
+**Superadministrador y registros eliminados.** Lo que borra un administrador de delegación (actividad, evidencia, etc.) desaparece para él, pero el superadministrador lo sigue viendo en el Admin (columna «Estado», filtro «Eliminados», solo lectura) y puede restaurarlo con la acción «Restaurar». Ambas acciones quedan en la auditoría. Un registro cuyo padre sigue eliminado (una evidencia, gestión o seguimiento de una actividad o compromiso eliminado) no se restaura: el Admin avisa «Restaure primero…», porque quedaría activo colgando de algo que nadie ve (`BaseModel.padre_eliminado` en `core/models.py`).
 
-- `Evaluacion_Sumativa_II_BackEnd_Flex_parte_1.md` — pauta de evaluación.
-- `Resumen_Guia_Proyecto_SGR.md` — resumen de la guía del proyecto SGR.
-- `INSTRUCCIONES_AGENTE_IMPLEMENTACION_SGR.md` — especificación técnica de implementación.
+### Seguridad de la Evaluación 3 (OWASP)
+
+- **Límite de intentos de ingreso:** 5 fallos por usuario o 20 por IP en 15 minutos bloquean temporalmente el ingreso (`LOGIN_MAX_INTENTOS`, `LOGIN_MAX_INTENTOS_IP`, `LOGIN_VENTANA_MINUTOS`).
+- **Traza de accesos:** ingresos correctos y fallidos, bloqueos, cierres de sesión y accesos denegados (403) quedan en la traza de auditoría con usuario, IP y fecha (`funcionarios/accesos.py`). En AWS, con nginx delante, `CONFIAR_X_FORWARDED_FOR=True` para registrar la IP real del cliente.
+- **Política de seguridad de contenido (CSP):** `SECURE_CSP` en `config/settings.py`. Los `<script>` escritos en las plantillas llevan `nonce="{{ csp_nonce }}"`, y no se usan atributos `onclick=`/`onchange=` (el envío automático de selectores está en `static/js/autoenvio.js`).
+- Plan de pruebas, registro de deficiencias y capturas: [`docs/evaluacion-3/`](docs/evaluacion-3/README.md).
+
+## Dónde está cada requisito en el código
+
+| Requisito | Archivos |
+| --- | --- |
+| Conexión a BD por variables de entorno | `config/settings.py` (`DATABASES`), `.env.example` |
+| Modelos (inglés, `db_table`) y Admin | `*/models.py`, `*/admin.py`, `core/admin_utils.py` (`ScopedModelAdmin`) |
+| Fechas de auditoría y borrado lógico | `core/models.py` (`TimeStampedModel`, `BaseModel`), `core/soft_delete.py` (managers `objects` / `all_objects`) |
+| Traza con valores anteriores y nuevos | `core/admin_utils.py` (`registrar_en_auditoria`, `cambios_del_formulario`), `core/crud.py` (`CrudFormView.form_valid`), `colaboracion/models.py` (`AuditLog.changes`) |
+| Login, logout y rechazo de cuentas sin rol | `config/urls.py`, `funcionarios/forms.py` (`LoginForm`), `templates/registration/login.html` |
+| Recuperación con código de 6 dígitos | `funcionarios/recuperacion.py`, `funcionarios/views.py`, modelo `PasswordResetCode` |
+| Política de contraseñas | `config/settings.py` (`AUTH_PASSWORD_VALIDATORS`), `core/validators.py` |
+| Roles, grupos y permisos | `funcionarios/security.py`, `core/admin_utils.py` (`get_rol`, `filtrar_por_delegacion`) |
+| Quién puede modificar qué (web y Admin) | `owner_field` y `bloqueo_modificacion` en cada modelo; política única `puede_modificar` / `modificables` / `excluir_bloqueados` en `core/admin_utils.py` |
+| Revisión de evidencias y estado de la actividad | `evidencias/services.py` (`registrar_revision`, `estado_segun_evidencias`), `evidencias/signals.py` |
+| CRUD, modal, paginación en sesión | `core/crud.py`, `*/views.py`, `*/forms.py`, `templates/crud/list.html` |
+| Archivos e imágenes | `evidencias/forms.py` (`clean_file`), `evidencias/models.py` (`ruta_evidencia`), `evidencias/signals.py` |
+| SweetAlert2 | `static/js/confirmar.js`, `static/vendor/sweetalert2/`, `templates/base.html` |
+| Excel | `reportes/services.py` (`respuesta_xlsx`), `core/crud.py` (`CrudExportView`) |
+| Datos de volumen | `core/volume_data.py`, `core/management/commands/seed_data.py` |
+| Dashboard por rol | `dashboard/views.py`, `dashboard/services.py` |
+| Límite de intentos, traza de accesos y CSP | `funcionarios/accesos.py`, `funcionarios/forms.py`, `config/settings.py` (`SECURE_CSP`), `funcionarios/tests_seguridad_owasp.py` |
+| Despliegue | `deploy/setup_ec2.sh`, `deploy/gunicorn-sgr.service`, `deploy/nginx-sgr.conf` |
