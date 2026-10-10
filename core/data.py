@@ -1,6 +1,8 @@
 import datetime
 
-from .models import Cargo, Delegacion, Parametro, Periodo, TipoActividad
+from django.utils import timezone
+
+from .models import Position, Delegation, Parameter, Period, ActivityType
 
 
 def build_core():
@@ -9,8 +11,8 @@ def build_core():
         ('Delegación Centro', 'Av. Francisco de Aguirre 100, La Serena', '+56512345601'),
         ('Delegación Norte', 'Av. Balmaceda 2200, La Serena', '+56512345602'),
     ]:
-        delegacion, _ = Delegacion.objects.get_or_create(
-            nombre=nombre, defaults={'direccion': direccion, 'telefono': telefono},
+        delegacion, _ = Delegation.objects.get_or_create(
+            name=nombre, defaults={'address': direccion, 'phone': telefono},
         )
         delegaciones[nombre] = delegacion
 
@@ -21,45 +23,74 @@ def build_core():
         ('Coordinador de Delegación', 'Jefatura', 'Coordinación general de la delegación.'),
         ('Verificador de Evidencias', 'Control de gestión', 'Revisión y validación de evidencias de actividades.'),
     ]:
-        cargo, _ = Cargo.objects.get_or_create(
-            nombre=nombre, defaults={'area': area, 'descripcion': descripcion},
+        cargo, _ = Position.objects.get_or_create(
+            name=nombre, defaults={'area': area, 'description': descripcion},
         )
         cargos[nombre] = cargo
 
     tipos = {}
     for codigo, nombre, categoria, subtipo in [
-        ('ATC-01', 'Atención ciudadana', 'atencion', ''),
-        ('TRA-02', 'Trámites', 'tramitacion', ''),
-        ('OPE-03', 'Operativo en terreno', 'operativo', ''),
+        ('ATC-01', 'Atención ciudadana', 'service', ''),
+        ('TRA-02', 'Trámites', 'paperwork', ''),
+        ('OPE-03', 'Operativo en terreno', 'field_work', ''),
         ('SOC-04', 'Atención social', 'social', ''),
-        ('COM-05', 'Actividad comunitaria', 'operativo', 'Comunitario'),
+        ('COM-05', 'Actividad comunitaria', 'field_work', 'Comunitario'),
     ]:
-        tipo, _ = TipoActividad.objects.get_or_create(
-            codigo=codigo, defaults={'nombre': nombre, 'categoria': categoria, 'subtipo': subtipo},
+        tipo, _ = ActivityType.objects.get_or_create(
+            code=codigo, defaults={'name': nombre, 'category': categoria, 'subtype': subtipo},
         )
         tipos[codigo] = tipo
 
-    periodos = {}
-    for nombre, inicio, termino, cerrado in [
-        ('2026-Q1 (cerrado)', datetime.date(2026, 1, 1), datetime.date(2026, 3, 31), True),
-        ('2026-S2 (actual)', datetime.date(2026, 6, 1), datetime.date(2026, 9, 30), False),
-    ]:
-        periodo, _ = Periodo.objects.get_or_create(
-            nombre=nombre, defaults={
-                'fecha_inicio': inicio, 'fecha_termino': termino, 'cerrado': cerrado,
-                'umbral_minimo': 80, 'tope_maximo': 150,
-            },
-        )
-        periodos[nombre] = periodo
+    # Períodos relativos a la fecha de la carga, así la demo funciona el día que se presente:
+    # el actual va de 3 meses atrás a 2 meses adelante (hoy queda dentro) y el cerrado son los 6 meses
+    # anteriores. Si ya hay períodos (una carga anterior), se conservan: repetir la carga no los duplica.
+    if not Period.objects.exists():
+        (inicio_cerrado, fin_cerrado), (inicio_actual, fin_actual) = rangos_de_periodos(timezone.localdate())
+        for inicio, termino, cerrado in [(inicio_cerrado, fin_cerrado, True), (inicio_actual, fin_actual, False)]:
+            Period.objects.create(
+                name=f'{nombre_de_rango(inicio, termino)} ({"cerrado" if cerrado else "actual"})',
+                start_date=inicio, end_date=termino, is_closed=cerrado, min_threshold=80, max_cap=100,
+            )
+    periodos = {p.name: p for p in Period.objects.all()}
 
     for clave, valor, descripcion in [
-        ('TOPE_MAXIMO', '150', 'Tope máximo de cumplimiento ponderado (RN-005).'),
+        ('TOPE_MAXIMO', '100', 'Tope máximo de cumplimiento por ítem (RN-005); el vigente es el de cada período.'),
         ('UMBRAL_MINIMO', '80', 'Umbral mínimo colectivo de cumplimiento (RN-006).'),
         ('AJUSTE_FELICITACION', '10', 'Ajuste porcentual por felicitación ciudadana (RN-011).'),
         ('AJUSTE_RECLAMO', '-20', 'Ajuste porcentual por reclamo ciudadano (RN-011).'),
     ]:
-        Parametro.objects.get_or_create(
-            clave=clave, defaults={'valor': valor, 'descripcion': descripcion, 'vigente': True},
+        Parameter.objects.get_or_create(
+            key=clave, defaults={'value': valor, 'description': descripcion, 'is_active': True},
         )
 
     return {'delegaciones': delegaciones, 'cargos': cargos, 'tipos': tipos, 'periodos': periodos}
+
+
+MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
+
+
+def _primer_dia_del_mes(fecha, desplazamiento):
+    indice = fecha.year * 12 + fecha.month - 1 + desplazamiento
+    return datetime.date(indice // 12, indice % 12 + 1, 1)
+
+
+def rangos_de_periodos(hoy):
+    """((inicio, fin) del período cerrado, (inicio, fin) del actual) alrededor de hoy."""
+    inicio_actual = _primer_dia_del_mes(hoy, -3)
+    fin_actual = _primer_dia_del_mes(hoy, 3) - datetime.timedelta(days=1)
+    inicio_cerrado = _primer_dia_del_mes(hoy, -9)
+    return (inicio_cerrado, inicio_actual - datetime.timedelta(days=1)), (inicio_actual, fin_actual)
+
+
+def nombre_de_rango(inicio, termino):
+    """«jun–nov 2026» o, si cruza de año, «oct 2025–mar 2026»."""
+    desde = MESES[inicio.month - 1] + ('' if inicio.year == termino.year else f' {inicio.year}')
+    return f'{desde}–{MESES[termino.month - 1]} {termino.year}'
+
+
+def periodo_actual():
+    return Period.objects.filter(is_closed=False).order_by('-start_date').first()
+
+
+def periodo_cerrado():
+    return Period.objects.filter(is_closed=True).order_by('-start_date').first()
