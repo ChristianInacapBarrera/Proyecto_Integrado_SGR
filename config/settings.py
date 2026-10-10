@@ -13,6 +13,8 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+from django.utils.csp import CSP
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -25,19 +27,51 @@ load_dotenv(BASE_DIR / '.env')
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv(
-    'SECRET_KEY',
-    'django-insecure-$-*djiy+z&m@7^jwlp5uez&(m=@yssxq(dmpmq_yzb9bd01^^t',
-)
+# Sin valor por defecto en el código: debe venir del .env (ver .env.example).
+SECRET_KEY = os.getenv('SECRET_KEY')
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        'Falta SECRET_KEY en el .env. Genere una con: '
+        'python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"'
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
+# Por defecto apagado: en desarrollo se activa con DEBUG=True en el .env.
+DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
     if host.strip()
 ]
+
+# Orígenes confiables para formularios POST (CSRF) cuando se accede por dominio/IP pública,
+# por ejemplo: CSRF_TRUSTED_ORIGINS=http://ec2-3-80-1-2.compute-1.amazonaws.com,https://sgr.midominio.cl
+CSRF_TRUSTED_ORIGINS = [
+    origen.strip() for origen in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if origen.strip()
+]
+
+# Detrás de nginx con HTTPS: nginx informa el esquema original en X-Forwarded-Proto.
+if os.getenv('BEHIND_HTTPS_PROXY', 'False') == 'True':
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+
+# OWASP A05 · Política de seguridad de contenido (CSP). El navegador solo ejecuta scripts del propio
+# sitio, de cdn.jsdelivr.net (Bootstrap, con hash de integridad) o con el nonce de la respuesta: un
+# script inyectado (XSS) no corre. Los estilos en línea se permiten porque la interfaz usa atributos
+# style (anchos de barras, colores) y un estilo no ejecuta código.
+SECURE_CSP = {
+    'default-src': [CSP.SELF],
+    'script-src': [CSP.SELF, 'https://cdn.jsdelivr.net', CSP.NONCE],
+    'style-src': [CSP.SELF, 'https://cdn.jsdelivr.net', CSP.UNSAFE_INLINE],
+    'img-src': [CSP.SELF, 'data:'],
+    'font-src': [CSP.SELF, 'https://cdn.jsdelivr.net'],
+    'connect-src': [CSP.SELF],
+    'object-src': [CSP.NONE],
+    'base-uri': [CSP.SELF],
+    'form-action': [CSP.SELF],
+    'frame-ancestors': [CSP.NONE],
+}
 
 
 # Application definition
@@ -54,10 +88,15 @@ INSTALLED_APPS = [
     'actividades',
     'evidencias',
     'agenda',
+    # API REST (Django REST Framework) con autenticación JWT (Simple JWT): app api/.
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'api',
     'medicion',
     'monitoreo',
     'reportes',
     'colaboracion',
+    'dashboard',
 ]
 
 MIDDLEWARE = [
@@ -66,8 +105,12 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    # Páginas con sesión iniciada: no se guardan en la caché del navegador (atrás/adelante tras cerrar sesión).
+    'core.middleware.SinCacheConSesionMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # OWASP A05: política de seguridad de contenido (cabecera Content-Security-Policy, ver SECURE_CSP).
+    'django.middleware.csp.ContentSecurityPolicyMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -80,6 +123,7 @@ TEMPLATES = [
         'OPTIONS': {
             'context_processors': [
                 'django.template.context_processors.request',
+                'django.template.context_processors.csp',  # {{ csp_nonce }} para los <script> en línea
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
             ],
@@ -93,25 +137,42 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
-DB_ENGINE = os.getenv('DB_ENGINE', 'django.db.backends.sqlite3')
-
-if DB_ENGINE == 'django.db.backends.sqlite3':
-    DATABASES = {
-        'default': {
-            'ENGINE': DB_ENGINE,
-            'NAME': BASE_DIR / os.getenv('DB_NAME', 'db.sqlite3'),
-        }
+# MySQL / MariaDB (en AWS: Amazon RDS). Para el laboratorio también se admite SQLite (ver más abajo).
+# Django 6.1 exige MySQL 8.4+ o MariaDB 10.11+ y el driver mysqlclient 2.2.1+.
+DATABASES = {
+    'default': {
+        'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.mysql'),
+        'NAME': os.getenv('DB_NAME', 'sgr'),
+        'USER': os.getenv('DB_USER', ''),
+        'PASSWORD': os.getenv('DB_PASSWORD', ''),
+        'HOST': os.getenv('DB_HOST', '127.0.0.1'),
+        'PORT': os.getenv('DB_PORT', '3306'),
+        # Reutiliza conexiones entre peticiones (segundos); 0 = cerrar al final de cada petición.
+        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '60')),
+        'OPTIONS': {
+            # utf8mb4: tildes, ñ y emojis completos (el "utf8" de MySQL solo cubre 3 bytes).
+            'charset': 'utf8mb4',
+            # Modo estricto: MySQL rechaza datos inválidos en vez de truncarlos en silencio.
+            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+        },
+        'TEST': {
+            'NAME': os.getenv('DB_TEST_NAME', 'test_' + os.getenv('DB_NAME', 'sgr')),
+            'CHARSET': 'utf8mb4',
+            'COLLATION': 'utf8mb4_unicode_ci',
+        },
     }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': DB_ENGINE,
-            'NAME': os.getenv('DB_NAME', ''),
-            'USER': os.getenv('DB_USER', ''),
-            'PASSWORD': os.getenv('DB_PASSWORD', ''),
-            'HOST': os.getenv('DB_HOST', ''),
-            'PORT': os.getenv('DB_PORT', ''),
-        }
+}
+
+# Conexión cifrada a RDS: descargar el bundle de certificados de AWS y apuntar DB_SSL_CA a él.
+if os.getenv('DB_SSL_CA'):
+    DATABASES['default']['OPTIONS']['ssl'] = {'ca': os.getenv('DB_SSL_CA')}
+
+# Alternativa para un equipo sin MariaDB (laboratorio): DB_ENGINE=django.db.backends.sqlite3 en el .env.
+# La base queda en un archivo (db.sqlite3 por defecto, fuera del repositorio por .gitignore).
+if DATABASES['default']['ENGINE'].endswith('sqlite3'):
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / os.getenv('DB_NAME_SQLITE', 'db.sqlite3'),
     }
 
 
@@ -124,12 +185,17 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        'OPTIONS': {'min_length': 10},
     },
     {
         'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
     },
     {
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+    },
+    {
+        # Mayúscula, minúscula, número y carácter especial (core/validators.py).
+        'NAME': 'core.validators.ComplexPasswordValidator',
     },
 ]
 
@@ -143,25 +209,124 @@ TIME_ZONE = 'America/Santiago'
 
 USE_I18N = True
 
+# Traducciones propias (locale/es) para textos de Django 6.1 que aún no vienen en español.
+LOCALE_PATHS = [BASE_DIR / 'locale']
+# Fechas en formato chileno (dd-mm-aaaa) también en el Admin: config/formats/es/formats.py.
+FORMAT_MODULE_PATH = ['config.formats']
+
 USE_TZ = True
 
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATICFILES_DIRS = [BASE_DIR / 'static']
+# En producción: python manage.py collectstatic reúne aquí los archivos y nginx los sirve.
+STATIC_ROOT = BASE_DIR / os.getenv('STATIC_ROOT_DIR', 'staticfiles')
 
-MEDIA_URL = 'media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# Los archivos subidos no se publican como carpeta: /archivos/<nombre> es una vista que exige sesión,
+# permiso y delegación (evidencias.views.archivo_evidencia). nginx no expone MEDIA_ROOT.
+MEDIA_URL = '/archivos/'
+MEDIA_ROOT = BASE_DIR / os.getenv('MEDIA_ROOT_DIR', 'media')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
+# Django 6.1 reemplaza EMAIL_BACKEND/EMAIL_HOST/... por MAILERS (definir ambos es un error),
+# así que las mismas variables de entorno de la guía se leen dentro de MAILERS.
+# En desarrollo el backend de consola imprime el correo en la terminal.
 
+EMAIL_BACKEND_ENV = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
 MAILERS = {
     'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+        'BACKEND': EMAIL_BACKEND_ENV,
     },
+}
+if EMAIL_BACKEND_ENV.endswith('smtp.EmailBackend'):
+    MAILERS['default']['OPTIONS'] = {
+        'host': os.getenv('EMAIL_HOST', ''),
+        'port': int(os.getenv('EMAIL_PORT', '2525')),
+        'username': os.getenv('EMAIL_HOST_USER', ''),
+        'password': os.getenv('EMAIL_HOST_PASSWORD', ''),
+        'use_tls': os.getenv('EMAIL_USE_TLS', 'True') == 'True',
+    }
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'SGR La Serena <no-responder@demo.sgr.local>')
+
+
+# Autenticación (rutas de django.contrib.auth.urls montadas en config/urls.py)
+LOGIN_URL = 'login'
+LOGIN_REDIRECT_URL = 'dashboard'
+LOGOUT_REDIRECT_URL = 'login'
+
+
+# Mensajes: el nivel ERROR usa la clase "danger" de Bootstrap (alert-error no existe).
+from django.contrib.messages import constants as message_constants  # noqa: E402
+
+MESSAGE_TAGS = {
+    message_constants.DEBUG: 'secondary',
+    message_constants.ERROR: 'danger',
+}
+
+
+# Sesiones y cookies: COOKIE_SECURE=True solo en producción con HTTPS.
+COOKIE_SECURE = os.getenv('COOKIE_SECURE', 'False').lower() == 'true'
+SESSION_COOKIE_AGE = 60 * 60 * 2  # 2 horas
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+SESSION_COOKIE_HTTPONLY = True
+SESSION_SAVE_EVERY_REQUEST = False
+SESSION_COOKIE_SECURE = COOKIE_SECURE
+CSRF_COOKIE_SECURE = COOKIE_SECURE
+SESSION_COOKIE_SAMESITE = 'Lax'
+
+
+# Recuperación de contraseña mediante código temporal
+RECUPERACION_CODIGO_VIGENCIA_SEGUNDOS = int(os.getenv('RECUPERACION_CODIGO_VIGENCIA_SEGUNDOS', '120'))
+
+# OWASP A07 · Límite de intentos de ingreso (funcionarios/accesos.py). Superado el máximo dentro de la
+# ventana, el usuario (o la IP) queda bloqueado hasta que los fallos salen de la ventana.
+LOGIN_MAX_INTENTOS = int(os.getenv('LOGIN_MAX_INTENTOS', '5'))          # por nombre de usuario
+LOGIN_MAX_INTENTOS_IP = int(os.getenv('LOGIN_MAX_INTENTOS_IP', '20'))   # por IP (muchas cuentas)
+LOGIN_VENTANA_MINUTOS = int(os.getenv('LOGIN_VENTANA_MINUTOS', '15'))
+# Detrás de nginx la IP real llega en X-Forwarded-For. Solo activarlo si nginx está delante:
+# sin proxy, cualquiera podría escribir esa cabecera y hacerse pasar por otra IP.
+CONFIAR_X_FORWARDED_FOR = os.getenv('CONFIAR_X_FORWARDED_FOR', 'False') == 'True'
+RECUPERACION_CODIGO_MAX_INTENTOS = 5
+RECUPERACION_MAX_SOLICITUDES_HORA = 5  # códigos que un mismo usuario puede pedir por hora
+
+
+# Archivos de evidencia
+EVIDENCIA_TAMANO_MAXIMO_MB = 2
+# Un formulario de evidencia sube un solo archivo; Django rechaza peticiones con más de estos.
+DATA_UPLOAD_MAX_NUMBER_FILES = 5
+
+
+# API REST (Django REST Framework) con JWT (Simple JWT). Todo vive en la app api/.
+# - JWT va primero: una petición sin token (o con un token vencido) responde 401.
+# - La sesión se mantiene solo para recorrer la API navegable con la sesión del sitio.
+# - Permiso por defecto: rol de la API (api/permisos.py). Administrador lee y escribe, operador solo lee
+#   y cualquier otro usuario autenticado recibe 403.
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': ['api.permisos.PermisoPorRolAPI'],
+    'DEFAULT_PAGINATION_CLASS': 'api.paginacion.PaginacionSGR',
+    'PAGE_SIZE': 20,
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+        'rest_framework.renderers.BrowsableAPIRenderer',
+    ],
+}
+
+from datetime import timedelta  # noqa: E402
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=int(os.getenv('JWT_ACCESS_MINUTOS', '30'))),
+    'REFRESH_TOKEN_LIFETIME': timedelta(hours=int(os.getenv('JWT_REFRESH_HORAS', '24'))),
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'UPDATE_LAST_LOGIN': False,
 }

@@ -54,6 +54,8 @@ cover/
 # Translations
 *.mo
 *.pot
+# Traducciones propias ya compiladas: se versionan para no exigir gettext al levantar el proyecto.
+!locale/**/*.mo
 
 # Django stuff:
 *.log
@@ -219,3 +221,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Archivos generados por collectstatic
+staticfiles/
+archivos_de_prueba/
