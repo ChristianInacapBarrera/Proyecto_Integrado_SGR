@@ -1,0 +1,299 @@
+{% extends "base.html" %}
+{% load dashboard_tags l10n %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% comment %}
+Contenido según el rol (banderas es_funcionario / es_verificador / es_gestor desde la vista):
+- Funcionario: su propio avance, evidencias en revisión o rechazadas y compromisos por vencer.
+- Verificador: la cola de evidencias por revisar.
+- Administradores (de delegación y general): el avance del equipo y el detalle por funcionario.
+{% endcomment %}
+
+{% block content %}
+<div class="dash">
+<div class="row g-4">
+
+    {# ================= Columna principal ================= #}
+    <div class="col-xl-8 d-flex flex-column gap-4">
+
+        {# --- Banner de bienvenida --- #}
+        <section class="dash-hero">
+            <div class="dash-hero-texto">
+                <span class="dash-hero-etiqueta">Sistema de Gestión de Resultados</span>
+                <h1 class="dash-hero-titulo">
+                    {% if es_funcionario %}Mi gestión{% elif es_verificador %}Revisión de evidencias{% else %}Resumen de gestión{% endif %}<br>{{ period.name|default:"sin período" }}
+                </h1>
+                <p class="dash-hero-sub">
+                    {% if es_funcionario and propia %}{{ propia.employee.name }} · {% endif %}{{ rol_etiqueta }}{% if delegacion_usuario %} · {{ delegacion_usuario }}{% endif %}
+                </p>
+                <div class="d-flex flex-wrap gap-2 align-items-center">
+                    <form method="get" class="dash-periodo">
+                        <label for="periodo" class="visually-hidden">Período</label>
+                        <select id="periodo" name="period" class="form-select form-select-sm" data-autoenviar>
+                            {% for p in periodos %}
+                                <option value="{{ p.pk }}" {% if period and p.pk == period.pk %}selected{% endif %}>{{ p.name }}</option>
+                            {% endfor %}
+                        </select>
+                        <noscript><button class="btn btn-sm btn-light" type="submit">Ver</button></noscript>
+                    </form>
+                    {% if es_verificador %}
+                        {% if url_evidencias_pendientes %}
+                            <a href="{{ url_evidencias_pendientes }}" class="dash-hero-boton">
+                                Revisar evidencias <span class="dash-hero-flecha" aria-hidden="true">&rarr;</span>
+                            </a>
+                        {% endif %}
+                    {% elif perms.actividades.view_activity %}
+                        <a href="{% url 'actividad_list' %}" class="dash-hero-boton">
+                            {% if es_funcionario %}Mis actividades{% else %}Ver actividades{% endif %}
+                            <span class="dash-hero-flecha" aria-hidden="true">&rarr;</span>
+                        </a>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="dash-hero-deco" aria-hidden="true"><span></span><span></span></div>
+        </section>
+
+        {# --- Indicadores (armados por rol en la vista) --- #}
+        <div class="row g-3">
+            {% for k in indicadores %}{% include "dashboard/_kpi.html" %}{% endfor %}
+        </div>
+
+        <div class="row g-4">
+            {# --- Estado: de evidencias para el verificador, de actividades para el resto --- #}
+            <div class="col-md-6">
+                {% if es_verificador %}
+                    {% include "dashboard/_dona.html" with estado=estado_evidencias titulo="Estado de evidencias" unidad="evidencias" %}
+                {% else %}
+                    {% include "dashboard/_dona.html" with estado=estado_actividades titulo="Estado de actividades" unidad="actividades" %}
+                {% endif %}
+            </div>
+
+            <div class="col-md-6">
+            {% if es_verificador %}
+                {# --- Cola de revisión por delegación --- #}
+                <section class="dash-card h-100 d-flex flex-column">
+                    <h2 class="dash-card-titulo">Por revisar por delegación</h2>
+                    {% if totales.evi_pendientes %}
+                        <ul class="dash-leyenda mb-3">
+                            {% for seccion in secciones %}
+                            <li>
+                                <div class="d-flex justify-content-between small">
+                                    <span>{{ seccion.delegation.name }}</span>
+                                    <span class="text-muted">{{ seccion.totales.evi_pendientes }} por revisar</span>
+                                </div>
+                                <div class="dash-barra"><span class="dash-barra-marca" style="width: {% widthratio seccion.totales.evi_pendientes totales.evi_pendientes 100 %}%"></span></div>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        <p class="small text-muted mb-0">
+                            {% if dias_pendiente_mas_antigua %}La más antigua lleva {{ dias_pendiente_mas_antigua }} día{{ dias_pendiente_mas_antigua|pluralize }} esperando.{% else %}Todas las pendientes llegaron hoy.{% endif %}
+                        </p>
+                    {% else %}
+                        <p class="dash-vacio">No hay evidencias por revisar en este período.</p>
+                    {% endif %}
+                </section>
+            {% else %}
+                {# --- Cumplimiento ponderado del período --- #}
+                <section class="dash-card h-100 d-flex flex-column">
+                    <h2 class="dash-card-titulo">{% if es_funcionario %}Mi cumplimiento{% else %}Cumplimiento del período{% endif %}</h2>
+                    {% if hay_metas and totales.con_meta %}
+                        <p class="dash-grande">{{ totales.compliance_pct }}<small>%</small></p>
+                        <p class="small text-muted mb-3">
+                            {% if es_funcionario %}Según las metas de su cargo{% else %}Promedio de {{ totales.con_meta }} funcionario{{ totales.con_meta|pluralize }} con meta{% endif %},
+                            ponderado por tipo de actividad (cada tipo aporta hasta {{ tope_pct|floatformat:0 }} %).
+                            A esta fecha se esperaba un {{ esperado_pct }} %.
+                        </p>
+                        <div class="dash-avance" role="img"
+                             aria-label="Cumplimiento {{ totales.compliance_pct }} %, esperado {{ esperado_pct }} %">
+                            <span class="dash-avance-real" style="width: {{ totales.compliance_pct|tope|unlocalize }}%"></span>
+                            <span class="dash-avance-esperado" style="left: {{ esperado_pct|tope|unlocalize }}%" title="Esperado a la fecha: {{ esperado_pct }} %"></span>
+                        </div>
+                        <div class="d-flex justify-content-between small text-muted mt-1">
+                            <span>0 %</span><span>Esperado {{ esperado_pct }} %</span><span>100 %</span>
+                        </div>
+                        {% if es_gestor and umbral_colectivo %}
+                            {# RN-006: umbral mínimo colectivo del período (configurable en el Admin, Períodos). #}
+                            <p class="small mb-0 mt-2">
+                                Umbral mínimo colectivo: <strong>{{ umbral_colectivo|floatformat:0 }} %</strong> al cierre del período ·
+                                {% if totales.compliance_pct >= umbral_colectivo %}el equipo ya lo alcanza.{% else %}faltan {{ umbral_colectivo|sub:totales.compliance_pct|floatformat:1 }} puntos.{% endif %}
+                            </p>
+                        {% endif %}
+                    {% elif es_funcionario and propia.ponderadores_incompletos %}
+                        <p class="dash-vacio">Los ponderadores de su cargo suman {{ propia.ponderadores_incompletos }} % y deben sumar 100 %: el cumplimiento se calculará cuando se complete la configuración.</p>
+                    {% elif hay_metas %}
+                        <p class="dash-vacio">{% if es_funcionario %}Su cargo no tiene metas en este período.{% else %}Ningún cargo de su equipo tiene metas en este período.{% endif %}</p>
+                    {% else %}
+                        <p class="dash-vacio">Sin metas definidas para este período.</p>
+                    {% endif %}
+                    {# Datos que no aparecen en otra parte del dashboard (al funcionario ya se los dan sus indicadores) #}
+                    {% if es_gestor %}
+                    <div class="row g-2 mt-auto pt-3 text-center">
+                        <div class="col-4"><div class="dash-mini"><strong>{{ totales.act_sin_evidencia }}</strong><span>act. sin evidencia</span></div></div>
+                        <div class="col-4"><div class="dash-mini"><strong>{{ totales.bajo_meta }}</strong><span>funcionarios bajo meta</span></div></div>
+                        <div class="col-4"><div class="dash-mini"><strong>{{ totales.comp_por_vencer }}</strong><span>compr. vencen en {{ dias_por_vencer }} días</span></div></div>
+                    </div>
+                    {% endif %}
+                </section>
+            {% endif %}
+            </div>
+        </div>
+
+        {# --- Funcionario: su avance por tipo de actividad (lo que explica su cumplimiento) --- #}
+        {% if es_funcionario and propia and propia.con_meta %}
+        <section class="dash-card">
+            <h2 class="dash-card-titulo">Mi avance por tipo de actividad</h2>
+            <ul class="dash-leyenda">
+                {% for d in propia.detalle_metas %}
+                <li>
+                    <div class="d-flex justify-content-between small gap-2">
+                        <span>{{ d.tipo }} <span class="text-muted">· pondera {{ d.peso|floatformat:0 }} %</span></span>
+                        <span class="text-nowrap">{{ d.aprobadas }}/{{ d.meta }} aprobadas · {{ d.pct }} %</span>
+                    </div>
+                    <div class="dash-barra"><span class="dash-barra-marca" style="width: {{ d.pct|tope|unlocalize }}%"></span></div>
+                </li>
+                {% endfor %}
+            </ul>
+            <p class="small text-muted mb-0 mt-3">Solo cuentan las actividades aprobadas de los tipos con meta.</p>
+        </section>
+        {% endif %}
+
+    </div>
+
+    {# ================= Panel derecho ================= #}
+    <div class="col-xl-4 d-flex flex-column gap-4">
+
+        {# El anillo mide cuánto de lo recibido en el período ya fue revisado (no repite el cumplimiento). #}
+        <section class="dash-card text-center">
+            <h2 class="dash-card-titulo text-start">Revisión de evidencias</h2>
+            <div class="dash-anillo" style="--avance: {{ totales.revision_pct|unlocalize }}" role="img"
+                 aria-label="{{ totales.revision_pct }} % de las evidencias del período ya fue revisado">
+                <span class="dash-anillo-avatar">{{ user.get_full_name|default:user.get_username|iniciales }}</span>
+                <span class="dash-anillo-pct">{{ totales.revision_pct }} %</span>
+            </div>
+            <p class="dash-saludo">{{ saludo }}, {{ user.first_name|default:user.get_username }}</p>
+            <p class="small text-muted">
+                {% if es_funcionario %}
+                    {% if totales.act_rechazadas %}Tiene {{ totales.act_rechazadas }} actividad{{ totales.act_rechazadas|pluralize:"es" }} rechazada{{ totales.act_rechazadas|pluralize }} por corregir{% if totales.evi_pendientes %} y {{ totales.evi_pendientes }} evidencia{{ totales.evi_pendientes|pluralize }} en revisión{% endif %}.
+                    {% elif totales.evi_pendientes %}Tiene {{ totales.evi_pendientes }} evidencia{{ totales.evi_pendientes|pluralize }} en revisión.
+                    {% else %}No tiene actividades rechazadas ni evidencias en revisión.{% endif %}
+                {% elif es_verificador %}
+                    {% if totales.evi_pendientes %}Tiene {{ totales.evi_pendientes }} evidencia{{ totales.evi_pendientes|pluralize }} esperando revisión.{% else %}No hay evidencias esperando revisión.{% endif %}
+                {% else %}
+                    {{ totales.evi_revisadas }} de {{ totales.evi_total }} evidencias del período ya fueron revisadas.
+                {% endif %}
+            </p>
+
+            {# Serie única: el título la nombra, no necesita leyenda. #}
+            {% if es_verificador %}{% with serie=evidencias_por_mes titulo="Evidencias recibidas por mes" unidad="evidencias" %}{% include "dashboard/_por_mes.html" %}{% endwith %}
+            {% else %}{% with serie=por_mes titulo="Actividades por mes" unidad="actividades" %}{% include "dashboard/_por_mes.html" %}{% endwith %}{% endif %}
+        </section>
+
+        {% if es_gestor and destacados|length > 1 %}
+        <section class="dash-card">
+            <h2 class="dash-card-titulo">Funcionarios destacados</h2>
+            <ul class="dash-lista">
+                {% for fila in destacados %}
+                <li>
+                    <span class="dash-avatar" aria-hidden="true">{{ fila.employee.name|iniciales }}</span>
+                    <div class="flex-grow-1 min-w-0">
+                        <div class="fw-semibold text-truncate">{{ fila.employee.name }}</div>
+                        <div class="small text-muted text-truncate">{{ fila.employee.position }} · {{ fila.employee.delegation.name }}</div>
+                    </div>
+                    <span class="dash-chip"><span class="dash-punto semaforo-{{ fila.traffic_light }}" aria-hidden="true"></span>{{ fila.compliance_pct }} %</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% if perms.actividades.view_activity %}
+                <a href="{% url 'actividad_list' %}" class="dash-ver-todo">Ver todas las actividades</a>
+            {% endif %}
+        </section>
+        {% endif %}
+    </div>
+</div>
+
+{# Resumen por funcionario a ancho completo: la tabla tiene 6 columnas y en la columna angosta se apretaba. #}
+{% if es_gestor %}
+<div class="row g-4 mt-0">
+    <div class="col-12 d-flex flex-column gap-4">
+        {# --- Administradores: resumen por funcionario (también es la vista accesible de los datos) --- #}
+        {% for seccion in secciones %}
+        <section class="dash-card p-0">
+            <div class="dash-resumen-cab d-flex flex-wrap justify-content-between align-items-center gap-3">
+                <div>
+                    <h2 class="dash-card-titulo mb-0">Resumen por funcionario · {{ seccion.delegation.name }}</h2>
+                    <div class="dash-resumen-roles">
+                        {% for grupo in seccion.grupos %}
+                            <span class="dash-rol">{{ grupo.etiqueta }} · {{ grupo.totales.employees }}</span>
+                        {% endfor %}
+                        <span class="small text-muted align-self-center">{{ seccion.totales.employees }} funcionario(s)</span>
+                    </div>
+                </div>
+                <button class="dash-detalle-boton" type="button" data-bs-toggle="collapse"
+                        data-bs-target="#detalle-{{ seccion.delegation.pk }}" aria-expanded="false"
+                        aria-controls="detalle-{{ seccion.delegation.pk }}">
+                    <span class="dash-detalle-ver">Ver detalle</span>
+                    <span class="dash-detalle-ocultar">Ocultar detalle</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+            </div>
+            <div class="collapse dash-detalle" id="detalle-{{ seccion.delegation.pk }}">
+            <div class="table-responsive">
+                <table class="table dash-tabla tabla-tarjetas align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th>Funcionario</th>
+                            <th class="text-end">Actividades</th>
+                            <th class="text-end" title="Aprobadas / pendientes / rechazadas">Apr. / Pend. / Rech.</th>
+                            <th class="text-end">Evid. por revisar</th>
+                            <th class="text-end" title="Abiertos a hoy (vencidos)">Compromisos</th>
+                            <th>Cumplimiento</th>
+                        </tr>
+                    </thead>
+                    {% for grupo in seccion.grupos %}
+                    <tbody>
+                        <tr class="dash-grupo"><th colspan="6"><span class="dash-rol">{{ grupo.etiqueta }}</span> <span class="text-muted fw-normal small">{{ grupo.totales.employees }}</span></th></tr>
+                        {% for fila in grupo.filas %}
+                        <tr>
+                            <td data-etiqueta="Funcionario">
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="dash-avatar" aria-hidden="true">{{ fila.employee.name|iniciales }}</span>
+                                    <div>
+                                        <div class="fw-semibold">{{ fila.employee.name }}{% if fila.employee.user_id == user.pk %} <span class="badge dash-usted">Usted</span>{% endif %}</div>
+                                        <div class="small text-muted">{{ fila.employee.position }}</div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td class="text-end fw-semibold" data-etiqueta="Actividades">{{ fila.act_total }}</td>
+                            <td class="text-end text-nowrap" data-etiqueta="Apr. / Pend. / Rech.">{{ fila.act_aprobadas }} / {{ fila.act_pendientes }} / {{ fila.act_rechazadas }}</td>
+                            <td class="text-end" data-etiqueta="Evid. por revisar">{{ fila.evi_pendientes }}</td>
+                            <td class="text-end text-nowrap" data-etiqueta="Compromisos">{{ fila.comp_abiertos }}{% if fila.comp_vencidos %} <span class="dash-vencidos">({{ fila.comp_vencidos }} venc.)</span>{% endif %}</td>
+                            <td data-etiqueta="Cumplimiento">
+                                {% if fila.traffic_light %}
+                                    <div class="d-flex align-items-center gap-2">
+                                        <div class="dash-barra flex-grow-1"><span class="semaforo-{{ fila.traffic_light }}" style="width: {{ fila.compliance_pct|tope|unlocalize }}%"></span></div>
+                                        <span class="small text-nowrap">{{ fila.compliance_pct }} %</span>
+                                    </div>
+                                    <span class="small text-muted"><span class="dash-punto semaforo-{{ fila.traffic_light }}" aria-hidden="true"></span>{{ fila.traffic_light|semaforo_texto }}</span>
+                                {% elif fila.ponderadores_incompletos %}
+                                    <span class="small dash-vencidos">Ponderadores incompletos: suman {{ fila.ponderadores_incompletos }} % (RN-001)</span>
+                                {% else %}
+                                    <span class="small text-muted">Sin meta para su cargo</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                    {% empty %}
+                    <tbody><tr><td colspan="6" class="text-center text-muted py-4">Sin funcionarios registrados.</td></tr></tbody>
+                    {% endfor %}
+                </table>
+            </div>
+            </div>
+        </section>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+</div>
+{% endblock %}
