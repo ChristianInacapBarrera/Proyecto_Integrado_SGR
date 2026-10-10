@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}Ingreso{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-12 col-sm-10 col-md-6 col-lg-4">
+        <div class="card shadow-sm">
+            <div class="card-body p-4">
+                <h1 class="h4 mb-3 text-center">Ingreso al sistema</h1>
+
+                {% if user.is_authenticated and next %}
+                    <div class="alert alert-warning small">
+                        Su cuenta no tiene acceso a esa sección. Ingrese con otra cuenta o vuelva al
+                        <a href="{% url 'dashboard' %}">dashboard</a>.
+                    </div>
+                {% endif %}
+
+                <form method="post">
+                    {% csrf_token %}
+                    {% include "includes/form_campos.html" %}
+                    <input type="hidden" name="next" value="{{ next }}">
+                    <button class="btn btn-sgr w-100" type="submit">Ingresar</button>
+                </form>
+                <p class="text-center small mt-3 mb-0">
+                    <a href="{% url 'recuperar_solicitar' %}">¿Olvidó su contraseña?</a>
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
