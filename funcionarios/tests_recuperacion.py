@@ -1,0 +1,136 @@
+import re
+from datetime import timedelta
+
+from django.contrib.auth.models import User
+from django.core import mail
+from django.test import TestCase, override_settings
+from django.urls import reverse
+from django.utils import timezone
+
+from core.testing import sembrar_datos_demo
+
+from .models import PasswordResetCode
+
+EMAIL = 'admin_centro@demo.sgr.local'
+NUEVA = 'NuevaClave#2026sgr'
+
+
+@override_settings(MAILERS={'default': {'BACKEND': 'django.core.mail.backends.locmem.EmailBackend'}})
+class RecuperacionTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        sembrar_datos_demo()
+
+    def _solicitar(self, email=EMAIL):
+        return self.client.post(reverse('recuperar_solicitar'), {'email': email}, follow=True)
+
+    def _codigo_enviado(self):
+        return re.search(r'\b(\d{6})\b', mail.outbox[-1].body).group(1)
+
+    def _flujo_hasta_codigo(self):
+        self._solicitar()
+        return self._codigo_enviado()
+
+    def test_envia_codigo_de_6_digitos_y_guarda_solo_el_hash(self):
+        codigo = self._flujo_hasta_codigo()
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [EMAIL])
+        registro = PasswordResetCode.objects.get()
+        self.assertNotEqual(registro.code_hash, codigo)
+        self.assertNotIn(codigo, registro.code_hash)
+        vigencia = (registro.expires_at - registro.created_at).total_seconds()
+        self.assertAlmostEqual(vigencia, 120, delta=2)
+
+    def test_respuesta_generica_si_el_correo_no_existe(self):
+        existe = self._solicitar()
+        no_existe = self.client.post(reverse('recuperar_solicitar'), {'email': 'nadie@x.cl'}, follow=True)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertContains(existe, 'Si el correo corresponde')
+        self.assertContains(no_existe, 'Si el correo corresponde')
+        self.assertEqual(existe.redirect_chain, no_existe.redirect_chain)
+
+    def test_flujo_completo_cambia_contrasena_con_set_password(self):
+        codigo = self._flujo_hasta_codigo()
+        response = self.client.post(reverse('recuperar_codigo'), {'code': codigo})
+        self.assertRedirects(response, reverse('recuperar_nueva'))
+        response = self.client.post(reverse('recuperar_nueva'), {'new_password1': NUEVA, 'new_password2': NUEVA})
+        self.assertRedirects(response, reverse('login'))
+        self.assertTrue(User.objects.get(email=EMAIL).check_password(NUEVA))
+        self.assertTrue(self.client.login(username='admin_centro', password=NUEVA))
+
+    def test_codigo_es_de_uso_unico(self):
+        codigo = self._flujo_hasta_codigo()
+        self.client.post(reverse('recuperar_codigo'), {'code': codigo})
+        session = self.client.session
+        session['recuperacion_email'] = EMAIL
+        session.save()
+        response = self.client.post(reverse('recuperar_codigo'), {'code': codigo})
+        self.assertContains(response, 'Código incorrecto o vencido.')
+
+    def test_codigo_vencido_no_se_acepta(self):
+        codigo = self._flujo_hasta_codigo()
+        PasswordResetCode.objects.update(expires_at=timezone.now() - timedelta(seconds=1))
+        response = self.client.post(reverse('recuperar_codigo'), {'code': codigo})
+        self.assertContains(response, 'Código incorrecto o vencido.')
+
+    def test_nuevo_codigo_invalida_el_anterior(self):
+        primero = self._flujo_hasta_codigo()
+        segundo = self._flujo_hasta_codigo()
+        self.assertEqual(PasswordResetCode.objects.filter(is_used=False).count(), 1)
+        if primero != segundo:
+            response = self.client.post(reverse('recuperar_codigo'), {'code': primero})
+            self.assertContains(response, 'Código incorrecto o vencido.')
+        response = self.client.post(reverse('recuperar_codigo'), {'code': segundo})
+        self.assertRedirects(response, reverse('recuperar_nueva'))
+
+    def test_maximo_5_intentos(self):
+        codigo = self._flujo_hasta_codigo()
+        incorrecto = f'{(int(codigo) + 1) % 1000000:06d}'
+        for _ in range(4):
+            response = self.client.post(reverse('recuperar_codigo'), {'code': incorrecto})
+            self.assertContains(response, 'Código incorrecto o vencido.')
+        response = self.client.post(reverse('recuperar_codigo'), {'code': incorrecto})
+        self.assertRedirects(response, reverse('recuperar_solicitar'))
+        self.assertTrue(PasswordResetCode.objects.get().is_used)
+        # Ni siquiera el código correcto sirve después del bloqueo.
+        session = self.client.session
+        session['recuperacion_email'] = EMAIL
+        session.save()
+        response = self.client.post(reverse('recuperar_codigo'), {'code': codigo})
+        self.assertContains(response, 'Código incorrecto o vencido.')
+
+    def test_no_se_puede_saltar_a_nueva_contrasena(self):
+        response = self.client.get(reverse('recuperar_nueva'))
+        self.assertRedirects(response, reverse('recuperar_solicitar'))
+
+    def test_login_enlaza_a_recuperacion(self):
+        response = self.client.get(reverse('login'))
+        self.assertContains(response, reverse('recuperar_solicitar'))
+
+
+class PoliticaDeContrasenaTests(TestCase):
+    def test_validadores_rechazan_claves_debiles(self):
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError
+
+        for debil in ['Corta#1a', 'sinmayuscula#2026', 'SINMINUSCULA#2026', 'SinNumero#Clave', 'SinEspecial2026x']:
+            with self.assertRaises(ValidationError, msg=debil):
+                validate_password(debil)
+        validate_password('Valida#Clave2026')  # cumple todo: no lanza
+
+    def test_recuperacion_pide_la_clave_dos_veces_y_aplica_la_politica(self):
+        from django.contrib.auth.models import User
+
+        sembrar_datos_demo()
+        user = User.objects.get(username='admin_centro')
+        session = self.client.session
+        session['recuperacion_validado'] = {'user_id': user.pk, 'hasta': 9999999999}
+        session.save()
+        response = self.client.post(reverse('recuperar_nueva'), {'new_password1': 'debil123', 'new_password2': 'debil123'})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('new_password2', response.context['form'].errors)
+        response = self.client.post(
+            reverse('recuperar_nueva'), {'new_password1': 'Valida#Clave2026', 'new_password2': 'Otra#Clave2026'},
+        )
+        self.assertIn('new_password2', response.context['form'].errors)  # no coinciden
+        self.assertFalse(User.objects.get(pk=user.pk).check_password('debil123'))
