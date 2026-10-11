@@ -1,49 +1,92 @@
+import datetime
+
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
-from core.models import Delegacion
-from funcionarios.models import Funcionario
+from core.models import BaseModel, Delegation
+from funcionarios.models import Employee
 
 
-class Compromiso(models.Model):
-    ESTADO_CHOICES = [
-        ('ingresado', 'Ingresado'),
-        ('pendiente', 'Pendiente'),
-        ('en_proceso', 'En proceso'),
-        ('realizado', 'Realizado'),
+# "Por vencer": vence desde hoy hasta dentro de esta cantidad de días. Lo usan la lista y el dashboard.
+DIAS_POR_VENCER = 7
+
+
+def compromisos_vencidos(qs, hoy):
+    return qs.exclude(status='done').filter(due_date__lt=hoy)
+
+
+def compromisos_por_vencer(qs, hoy):
+    return qs.exclude(status='done').filter(due_date__gte=hoy, due_date__lte=hoy + datetime.timedelta(days=DIAS_POR_VENCER))
+
+
+class Commitment(BaseModel):
+    STATUS_CHOICES = [
+        ('registered', 'Ingresado'),
+        ('pending', 'Pendiente'),
+        ('in_progress', 'En proceso'),
+        ('done', 'Realizado'),
     ]
 
-    titulo = models.CharField(max_length=200)
-    descripcion = models.TextField(blank=True)
-    delegacion = models.ForeignKey(Delegacion, on_delete=models.PROTECT, related_name='compromisos')
-    responsable = models.ForeignKey(
-        Funcionario, on_delete=models.SET_NULL, null=True, blank=True, related_name='compromisos'
+    title = models.CharField('título', max_length=200)
+    description = models.TextField('descripción', blank=True)
+    delegation = models.ForeignKey(Delegation, verbose_name='delegación', on_delete=models.PROTECT, related_name='commitments')
+    responsible = models.ForeignKey(
+        Employee, verbose_name='responsable', on_delete=models.SET_NULL, null=True, blank=True, related_name='commitments'
     )
-    fecha_vencimiento = models.DateField()
-    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='ingresado')
-    observaciones = models.TextField(blank=True)
+    due_date = models.DateField('fecha de vencimiento')
+    status = models.CharField('estado', max_length=20, choices=STATUS_CHOICES, default='registered')
+    notes = models.TextField('observaciones', blank=True)
+
+    soft_delete_cascade = ('follow_ups',)
+    owner_field = 'responsible'
 
     class Meta:
-        ordering = ['fecha_vencimiento']
+        db_table = 'commitment'
+        ordering = ['due_date']
         verbose_name = 'Compromiso'
         verbose_name_plural = 'Compromisos'
 
     def __str__(self):
-        return self.titulo
+        return self.title
+
+    def clean(self):
+        if self.responsible_id and self.delegation_id and self.responsible.delegation_id != self.delegation_id:
+            raise ValidationError({'responsible': 'El responsable debe pertenecer a la delegación del compromiso.'})
+        if self.status == 'done' and not self.notes.strip():
+            raise ValidationError({'notes': 'Para marcar el compromiso como realizado debe registrar observaciones.'})
 
 
-class SeguimientoCompromiso(models.Model):
-    compromiso = models.ForeignKey(Compromiso, on_delete=models.CASCADE, related_name='seguimientos')
-    fecha = models.DateTimeField(auto_now_add=True)
-    responsable = models.ForeignKey(
-        Funcionario, on_delete=models.SET_NULL, null=True, blank=True, related_name='seguimientos'
+class CommitmentFollowUp(BaseModel):
+    commitment = models.ForeignKey(
+        Commitment, verbose_name='compromiso', on_delete=models.CASCADE, related_name='follow_ups', limit_choices_to={'deleted_at__isnull': True},
     )
-    descripcion = models.TextField()
-    estado_nuevo = models.CharField(max_length=20, choices=Compromiso.ESTADO_CHOICES)
+    date = models.DateTimeField('fecha', auto_now_add=True)
+    responsible = models.ForeignKey(
+        Employee, verbose_name='responsable', on_delete=models.SET_NULL, null=True, blank=True, related_name='follow_ups'
+    )
+    description = models.TextField('descripción')
+    new_status = models.CharField('estado nuevo', max_length=20, choices=Commitment.STATUS_CHOICES)
+
+    owner_field = 'commitment__responsible'
 
     class Meta:
-        ordering = ['-fecha']
+        db_table = 'commitment_follow_up'
+        ordering = ['-date']
         verbose_name = 'Seguimiento de compromiso'
         verbose_name_plural = 'Seguimientos de compromiso'
 
     def __str__(self):
-        return f'{self.compromiso.titulo} - {self.estado_nuevo}'
+        return f'{self.commitment.title} - {self.new_status}'
+
+    def save(self, *args, **kwargs):
+        nuevo = self._state.adding
+        super().save(*args, **kwargs)
+        if nuevo and self.deleted_at is None:
+            # Un seguimiento registra el avance: el compromiso pasa al estado indicado. Si queda
+            # realizado sin observaciones, la descripción del seguimiento sirve como tales.
+            # update() no pasa por save(): updated_at se fija a mano.
+            cambios = {'status': self.new_status, 'updated_at': timezone.now()}
+            if self.new_status == 'done' and not self.commitment.notes.strip():
+                cambios['notes'] = self.description
+            Commitment.all_objects.filter(pk=self.commitment_id).update(**cambios)
